@@ -7,6 +7,7 @@ import mimetypes
 import os
 import re
 import sys
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -50,12 +51,12 @@ def load_local_env(root: Path = ROOT) -> None:
             os.environ[key] = value
 
 
-def _probe(url: str, token: str = "") -> str:
+def _probe(url: str, token: str = "", *, auth_header: str = "Authorization", auth_scheme: str = "Bearer ") -> str:
     if not url:
         return "NOT_CONFIGURED"
     headers = {"Accept": "application/json", "User-Agent": "AI-Media-OS-Health/1.0"}
     if token:
-        headers["Authorization"] = f"Bearer {token}"
+        headers[auth_header] = f"{auth_scheme}{token}"
     request = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(request, timeout=2) as response:
@@ -63,6 +64,23 @@ def _probe(url: str, token: str = "") -> str:
     except urllib.error.HTTPError as error:
         return "ERROR" if error.code >= 500 else "OFFLINE"
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return "OFFLINE"
+
+
+def _probe_github_cli() -> str:
+    """Verify the host's existing gh auth without exposing the account or token."""
+    try:
+        result = subprocess.run(
+            ["gh", "api", "user", "--jq", ".login"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=3,
+        )
+        return "ONLINE" if result.returncode == 0 and result.stdout.strip() else "OFFLINE"
+    except FileNotFoundError:
+        return "NOT_CONFIGURED"
+    except (OSError, subprocess.TimeoutExpired):
         return "OFFLINE"
 
 
@@ -75,10 +93,18 @@ def system_health(store: Store, owner_token: str, environ: dict[str, str] | None
 
     ai_url = env.get("AI_ROUTER_HEALTH_URL", "").strip()
     ai_token = env.get("AI_ROUTER_API_KEY", "")
+    if not ai_url:
+        openai_base = env.get("OPENAI_API_BASE", "").strip().rstrip("/")
+        openai_key = env.get("OPENAI_API_KEY", "")
+        if openai_base and openai_key:
+            ai_url, ai_token = f"{openai_base}/models", openai_key
     manus_url = env.get("MANUS_HEALTH_URL", "").strip()
-    manus_token = env.get("MANUS_API_TOKEN", "")
+    manus_token = env.get("MANUS_API_TOKEN", "") or env.get("MANUS_API_KEY", "")
+    if not manus_url and manus_token:
+        manus_url = "https://api.manus.ai/v2/task.list?limit=1"
     github_token = env.get("GITHUB_TOKEN", "")
     github_url = (env.get("GITHUB_HEALTH_URL", "").strip() or "https://api.github.com/user") if github_token else ""
+    use_github_cli = env.get("GITHUB_USE_CLI", "").strip().lower() in {"1", "true", "yes"}
 
     external: dict[str, str] = {}
     raw_external = env.get("EXTERNAL_HEALTH_URLS", "").strip()
@@ -95,12 +121,16 @@ def system_health(store: Store, owner_token: str, environ: dict[str, str] | None
         "database": database_status,
         "authentication": "ONLINE" if owner_token else "NOT_CONFIGURED",
         "ai_router": _probe(ai_url, ai_token),
-        "manus": _probe(manus_url, manus_token),
-        "github": _probe(github_url, github_token),
+        "manus": _probe(manus_url, manus_token, auth_header="x-manus-api-key", auth_scheme=""),
+        "github": _probe(github_url, github_token) if github_token else (_probe_github_cli() if use_github_cli else "NOT_CONFIGURED"),
         "external_integrations": ({name: _probe(url) for name, url in external.items()} if external else "NOT_CONFIGURED"),
     }
     statuses = [value for key, value in checks.items() if key not in {"authentication", "external_integrations"} and isinstance(value, str)]
-    overall = "ERROR" if "ERROR" in statuses else ("OFFLINE" if "OFFLINE" in statuses else ("NOT_CONFIGURED" if checks["authentication"] == "NOT_CONFIGURED" else "ONLINE"))
+    overall = "ERROR" if "ERROR" in statuses else (
+        "OFFLINE" if "OFFLINE" in statuses else (
+            "NOT_CONFIGURED" if "NOT_CONFIGURED" in statuses or checks["authentication"] == "NOT_CONFIGURED" else "ONLINE"
+        )
+    )
     return {"overall": overall, "checks": checks, "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")}
 
 

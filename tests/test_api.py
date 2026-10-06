@@ -13,16 +13,17 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
-from backend.server import make_handler  # noqa: E402
+from backend.server import make_handler, system_health  # noqa: E402
+from backend.store import Store  # noqa: E402
 
 
 class ApiTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.env_patch = patch.dict(os.environ, {
-            "AI_ROUTER_HEALTH_URL": "", "AI_ROUTER_API_KEY": "",
-            "MANUS_HEALTH_URL": "", "MANUS_API_TOKEN": "",
-            "GITHUB_HEALTH_URL": "", "GITHUB_TOKEN": "", "EXTERNAL_HEALTH_URLS": "",
+            "AI_ROUTER_HEALTH_URL": "", "AI_ROUTER_API_KEY": "", "OPENAI_API_BASE": "", "OPENAI_API_KEY": "",
+            "MANUS_HEALTH_URL": "", "MANUS_API_TOKEN": "", "MANUS_API_KEY": "",
+            "GITHUB_HEALTH_URL": "", "GITHUB_TOKEN": "", "GITHUB_USE_CLI": "", "EXTERNAL_HEALTH_URLS": "",
         })
         self.env_patch.start()
         self.token = "test-token-for-owner-access-32-chars"
@@ -76,6 +77,40 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(payload["checks"]["authentication"], "ONLINE")
         self.assertEqual(payload["checks"]["github"], "NOT_CONFIGURED")
         self.assertEqual(payload["checks"]["manus"], "NOT_CONFIGURED")
+        self.assertEqual(payload["overall"], "NOT_CONFIGURED")
+
+    def test_ai_router_falls_back_to_authenticated_openai_compatible_models_endpoint(self):
+        store = Store(Path(self.temp.name) / "health-ai.sqlite3")
+        store.initialize()
+        env = {"OPENAI_API_BASE": "https://router.example/v1", "OPENAI_API_KEY": "test-ai-key"}
+        with patch("backend.server._probe", return_value="ONLINE") as probe:
+            health = system_health(store, self.token, environ=env)
+        self.assertEqual(health["checks"]["ai_router"], "ONLINE")
+        probe.assert_any_call("https://router.example/v1/models", "test-ai-key")
+
+    def test_manus_api_key_uses_official_header_and_limited_health_query(self):
+        store = Store(Path(self.temp.name) / "health-manus.sqlite3")
+        store.initialize()
+        env = {"MANUS_API_KEY": "test-manus-key"}
+        with patch("backend.server._probe", return_value="ONLINE") as probe:
+            health = system_health(store, self.token, environ=env)
+        self.assertEqual(health["checks"]["manus"], "ONLINE")
+        probe.assert_any_call(
+            "https://api.manus.ai/v2/task.list?limit=1",
+            "test-manus-key",
+            auth_header="x-manus-api-key",
+            auth_scheme="",
+        )
+
+    def test_github_cli_probe_is_opt_in_and_does_not_return_account_identity(self):
+        store = Store(Path(self.temp.name) / "health-github.sqlite3")
+        store.initialize()
+        env = {"GITHUB_USE_CLI": "true"}
+        with patch("backend.server._probe_github_cli", return_value="ONLINE") as probe:
+            health = system_health(store, self.token, environ=env)
+        self.assertEqual(health["checks"]["github"], "ONLINE")
+        self.assertNotIn("username", json.dumps(health))
+        probe.assert_called_once_with()
 
     def test_private_data_requires_owner_authentication(self):
         status, payload = self.request("GET", "/api/dashboard")
