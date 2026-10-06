@@ -39,6 +39,7 @@ export const api = {
   health: () => request('/health', {publicEndpoint: true}),
   modules: () => request('/modules', {publicEndpoint: true}),
   dashboard: () => request('/dashboard'),
+  company: () => request('/company'),
   tasks: (query = {}) => request('/tasks', {query}),
   createTask: (body) => request('/tasks', {method: 'POST', body}),
   updateTask: (id, body) => request(`/tasks/${encodeURIComponent(id)}`, {method: 'PATCH', body}),

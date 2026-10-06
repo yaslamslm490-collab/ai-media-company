@@ -116,6 +116,9 @@ class ApiTestCase(unittest.TestCase):
         status, payload = self.request("GET", "/api/dashboard")
         self.assertEqual(status, 401)
         self.assertEqual(payload["error"]["code"], "authentication_required")
+        status, payload = self.request("GET", "/api/company")
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["error"]["code"], "authentication_required")
         status, payload = self.request("POST", "/api/tasks", body={"title": "Forbidden"})
         self.assertEqual(status, 401)
         self.assertEqual(payload["error"]["code"], "authentication_required")
@@ -127,9 +130,44 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["company"]["task_counts"]["TOTAL"], 0)
         self.assertEqual(payload["company"]["waiting_approvals"]["value"], 0)
-        self.assertIsNone(payload["company"]["active_characters"]["value"])
-        self.assertEqual(payload["company"]["active_characters"]["status"], "NOT_CONFIGURED")
+        self.assertEqual(payload["company"]["active_ai_employees"]["value"], 0)
+        self.assertEqual(payload["company"]["active_characters"]["value"], 0)
+        self.assertEqual(payload["company"]["active_projects"]["value"], 0)
+        self.assertEqual(payload["company"]["active_characters"]["status"], "ONLINE")
         self.assertEqual(payload["recent_activity"], [])
+
+    def test_seed_initial_data_is_idempotent_and_visible_in_dashboard_and_modules(self):
+        store = Store(Path(self.temp.name) / "test.sqlite3")
+        store.initialize()
+        first = store.seed_initial_data()
+        second = store.seed_initial_data()
+        self.assertEqual(sum(first["inserted"].values()), 6)
+        self.assertFalse(any(second["inserted"].values()))
+        self.assertEqual(first["counts"], {"departments": 1, "ai_employees": 1, "characters": 1,
+                                             "projects": 1, "tasks": 1, "approvals": 1})
+
+        status, company = self.request("GET", "/api/company", token=self.token)
+        self.assertEqual(status, 200)
+        self.assertEqual(company["departments"][0]["name"], "إنتاج المحتوى")
+        self.assertEqual(company["ai_employees"][0]["department"], "إنتاج المحتوى")
+        self.assertEqual(company["characters"][0]["name"], "ليان")
+        self.assertEqual(company["projects"][0]["status"], "ACTIVE")
+
+        status, dashboard = self.request("GET", "/api/dashboard", token=self.token)
+        self.assertEqual(status, 200)
+        self.assertEqual(dashboard["company"]["active_departments"]["value"], 1)
+        self.assertEqual(dashboard["company"]["active_ai_employees"]["value"], 1)
+        self.assertEqual(dashboard["company"]["active_characters"]["value"], 1)
+        self.assertEqual(dashboard["company"]["active_projects"]["value"], 1)
+        self.assertEqual(dashboard["company"]["task_counts"]["IN_PROGRESS"], 1)
+        self.assertEqual(dashboard["company"]["waiting_approvals"]["value"], 1)
+
+        status, modules = self.request("GET", "/api/modules")
+        self.assertEqual(status, 200)
+        states = {module["id"]: module["state"] for module in modules["modules"]}
+        self.assertEqual(states["ai-team"], "READY")
+        self.assertEqual(states["characters"], "READY")
+        self.assertEqual(states["projects"], "READY")
 
     def test_task_create_transition_dashboard_and_activity_are_persisted(self):
         status, payload = self.request("POST", "/api/tasks", token=self.token, body={

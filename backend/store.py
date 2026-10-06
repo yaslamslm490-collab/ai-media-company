@@ -85,6 +85,41 @@ class Store:
                     error TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS activity_timestamp_idx ON activity_logs(timestamp DESC);
+
+                CREATE TABLE IF NOT EXISTS departments (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL CHECK(status IN ('ACTIVE','INACTIVE')),
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS ai_employees (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    department_id TEXT REFERENCES departments(id),
+                    status TEXT NOT NULL CHECK(status IN ('ACTIVE','INACTIVE')),
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ai_employees_status_idx ON ai_employees(status, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS characters (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL CHECK(status IN ('ACTIVE','INACTIVE')),
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS projects (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL CHECK(status IN ('ACTIVE','ON_HOLD','COMPLETED')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
             """)
 
     def ping(self) -> bool:
@@ -237,6 +272,112 @@ class Store:
         with self.connect() as db:
             return db.execute("SELECT COUNT(*) FROM activity_logs").fetchone()[0]
 
+    def list_departments(self) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM departments ORDER BY name").fetchall()
+        return [dict(row) for row in rows]
+
+    def list_ai_employees(self) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute("""SELECT e.*, d.name AS department
+                FROM ai_employees e LEFT JOIN departments d ON d.id=e.department_id
+                ORDER BY e.name""").fetchall()
+        return [dict(row) for row in rows]
+
+    def list_characters(self) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM characters ORDER BY name").fetchall()
+        return [dict(row) for row in rows]
+
+    def list_projects(self) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM projects ORDER BY created_at DESC").fetchall()
+        return [dict(row) for row in rows]
+
+    def count_active(self, table: str) -> int:
+        if table not in {"departments", "ai_employees", "characters", "projects"}:
+            raise ValueError("invalid_entity_table")
+        with self.connect() as db:
+            return db.execute(f"SELECT COUNT(*) FROM {table} WHERE status='ACTIVE'").fetchone()[0]
+
+    def seed_initial_data(self) -> dict[str, Any]:
+        """Insert stable starter rows once; never overwrite owner-created records."""
+        now = utc_now()
+        inserted: dict[str, bool] = {}
+        audit: list[tuple[str, str, str, str]] = []
+        with self.connect() as db:
+            department_id = "seed-dept-content-production"
+            employee_id = "seed-ai-employee-content-editor"
+            character_id = "seed-character-layan"
+            project_id = "seed-project-content-pilot"
+            task_id = "seed-task-first-content-brief"
+            approval_id = "seed-approval-first-content-review"
+
+            cursor = db.execute("""INSERT OR IGNORE INTO departments
+                (id,name,description,status,created_at) VALUES (?,?,?,?,?)""",
+                (department_id, "إنتاج المحتوى", "تخطيط وإعداد أصول المحتوى الرقمي.", "ACTIVE", now))
+            inserted["department"] = cursor.rowcount == 1
+            if inserted["department"]:
+                audit.append(("company-builder", "department", department_id, "إنتاج المحتوى"))
+            department_row = db.execute("SELECT id FROM departments WHERE id=?", (department_id,)).fetchone()
+            if department_row is None:
+                department_row = db.execute("SELECT id FROM departments WHERE name=?", ("إنتاج المحتوى",)).fetchone()
+            employee_department_id = department_row["id"]
+
+            cursor = db.execute("""INSERT OR IGNORE INTO ai_employees
+                (id,name,role,description,department_id,status,created_at) VALUES (?,?,?,?,?,?,?)""",
+                (employee_id, "مساعد المحتوى", "محرر ومخطط محتوى",
+                 "موظف تأسيسي لإعداد موجزات المحتوى ومتابعة مراجعتها.", employee_department_id, "ACTIVE", now))
+            inserted["ai_employee"] = cursor.rowcount == 1
+            if inserted["ai_employee"]:
+                audit.append(("ai-team", "ai_employee", employee_id, "مساعد المحتوى"))
+
+            cursor = db.execute("""INSERT OR IGNORE INTO characters
+                (id,name,role,description,status,created_at) VALUES (?,?,?,?,?,?)""",
+                (character_id, "ليان", "المقدمة الرقمية",
+                 "شخصية عربية ودودة تمثل نموذجاً أولياً لمحتوى الشركة.", "ACTIVE", now))
+            inserted["character"] = cursor.rowcount == 1
+            if inserted["character"]:
+                audit.append(("characters", "character", character_id, "ليان"))
+
+            cursor = db.execute("""INSERT OR IGNORE INTO projects
+                (id,name,description,status,created_at,updated_at) VALUES (?,?,?,?,?,?)""",
+                (project_id, "إطلاق قناة المحتوى التجريبية",
+                 "إعداد ومراجعة الحزمة الأولى من محتوى AI Media OS.", "ACTIVE", now, now))
+            inserted["project"] = cursor.rowcount == 1
+            if inserted["project"]:
+                audit.append(("projects", "project", project_id, "إطلاق قناة المحتوى التجريبية"))
+
+            cursor = db.execute("""INSERT OR IGNORE INTO tasks
+                (id,title,description,owner,assigned_employee,department,priority,status,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (task_id, "إعداد موجز الفيديو التجريبي",
+                 "صياغة موجز أول فيديو تعريفي وربطه بهوية الشخصية الرقمية.", "المالك",
+                 "مساعد المحتوى", "إنتاج المحتوى", "HIGH", "IN_PROGRESS", now, now))
+            inserted["task"] = cursor.rowcount == 1
+            if inserted["task"]:
+                audit.append(("tasks", "task", task_id, "إعداد موجز الفيديو التجريبي"))
+
+            cursor = db.execute("""INSERT OR IGNORE INTO approvals
+                (id,title,description,submitted_by,status,decision_note,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                (approval_id, "اعتماد الهوية التحريرية للحزمة الأولى",
+                 "مراجعة نبرة المحتوى وموجز الفيديو قبل بدء الإنتاج.",
+                 "مساعد المحتوى", "WAITING_APPROVAL", "", now, now))
+            inserted["approval"] = cursor.rowcount == 1
+            if inserted["approval"]:
+                audit.append(("approvals", "approval", approval_id, "اعتماد الهوية التحريرية للحزمة الأولى"))
+
+            for module, object_type, object_id, name in audit:
+                self.log_activity(db, actor="system", action="seed.created", module=module,
+                                  object_type=object_type, object_id=object_id, result=name)
+
+            counts = {
+                table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("departments", "ai_employees", "characters", "projects", "tasks", "approvals")
+            }
+        return {"inserted": inserted, "counts": counts}
+
     def dashboard(self, health: dict[str, Any]) -> dict[str, Any]:
         task_counts = self.count_tasks()
         approvals = self.count_pending_approvals()
@@ -246,9 +387,10 @@ class Store:
         return {
             "checked_at": utc_now(),
             "company": {
-                "active_ai_employees": {"status": "NOT_CONFIGURED", "value": None},
-                "active_characters": {"status": "NOT_CONFIGURED", "value": None},
-                "active_projects": {"status": "NOT_CONFIGURED", "value": None},
+                "active_departments": {"status": "ONLINE", "value": self.count_active("departments")},
+                "active_ai_employees": {"status": "ONLINE", "value": self.count_active("ai_employees")},
+                "active_characters": {"status": "ONLINE", "value": self.count_active("characters")},
+                "active_projects": {"status": "ONLINE", "value": self.count_active("projects")},
                 "running_tasks": {"status": "ONLINE", "value": task_counts["IN_PROGRESS"]},
                 "waiting_approvals": {"status": "ONLINE", "value": approvals},
                 "production_jobs": {"status": "NOT_CONFIGURED", "value": None},

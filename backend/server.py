@@ -134,6 +134,19 @@ def system_health(store: Store, owner_token: str, environ: dict[str, str] | None
     return {"overall": overall, "checks": checks, "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")}
 
 
+def module_catalog(store: Store, owner_token: str) -> list[dict[str, Any]]:
+    health = system_health(store, owner_token)
+    live_state = {
+        "ai-team": "READY" if store.count_active("ai_employees") else "NOT_CONFIGURED",
+        "characters": "READY" if store.count_active("characters") else "NOT_CONFIGURED",
+        "projects": "READY" if store.count_active("projects") else "NOT_CONFIGURED",
+        "ai-router": health["checks"]["ai_router"],
+        "manus": health["checks"]["manus"],
+        "github": health["checks"]["github"],
+    }
+    return [{**module, "state": live_state.get(module["id"], module["state"])} for module in MODULES]
+
+
 def _bounded_text(payload: dict[str, Any], key: str, *, required: bool = False, maximum: int = 4000) -> str:
     value = payload.get(key, "")
     if not isinstance(value, str):
@@ -310,12 +323,19 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             if path == "/api/health":
                 return system_health(store, token)
             if path == "/api/modules":
-                return {"modules": MODULES, "builder_capabilities": BUILDER_CAPABILITIES}
+                return {"modules": module_catalog(store, token), "builder_capabilities": BUILDER_CAPABILITIES}
             self._authenticate()
             query = self._query()
             if path == "/api/dashboard":
                 health = system_health(store, token)
                 return store.dashboard(health)
+            if path == "/api/company":
+                return {
+                    "departments": store.list_departments(),
+                    "ai_employees": store.list_ai_employees(),
+                    "characters": store.list_characters(),
+                    "projects": store.list_projects(),
+                }
             if path == "/api/tasks":
                 status = query.get("status", "").upper()
                 if status and status not in TASK_STATUSES:

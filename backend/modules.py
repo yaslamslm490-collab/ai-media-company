@@ -4,6 +4,7 @@ MODULES = [
     {"id": "tasks", "title": "مركز المهام", "group": "التشغيل", "icon": "☷", "state": "READY"},
     {"id": "approvals", "title": "مركز الموافقات", "group": "التشغيل", "icon": "✓", "state": "READY"},
     {"id": "activity", "title": "سجل النشاط", "group": "التشغيل", "icon": "◷", "state": "READY"},
+    {"id": "projects", "title": "المشاريع", "group": "التخطيط والتنفيذ", "icon": "▧", "state": "NOT_CONFIGURED"},
     {"id": "ai-team", "title": "فريق الذكاء الاصطناعي", "group": "أنظمة الذكاء الاصطناعي", "icon": "✣", "state": "NOT_CONFIGURED"},
     {"id": "ai-router", "title": "موجّه النماذج", "group": "أنظمة الذكاء الاصطناعي", "icon": "⌘", "state": "NOT_CONFIGURED"},
     {"id": "manus", "title": "Manus", "group": "أنظمة الذكاء الاصطناعي", "icon": "M", "state": "NOT_CONFIGURED"},

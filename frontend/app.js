@@ -110,6 +110,15 @@ function metricCard(name, metric, icon) {
   }
   return `<article class="kpi-card"><div class="kpi-top"><span>${esc(name)}</span><span class="kpi-icon green">${esc(icon)}</span></div><div class="kpi-value-row"><strong class="kpi-value">${Number(metric.value)}</strong></div><div class="kpi-note">مصدر البيانات: قاعدة البيانات</div></article>`;
 }
+function taskStatusChart(counts) {
+  const statuses = ['TODO', 'IN_PROGRESS', 'WAITING_APPROVAL', 'COMPLETED', 'CANCELLED', 'FAILED'];
+  const max = Math.max(1, ...statuses.map((status) => Number(counts[status] || 0)));
+  return `<div class="task-chart" role="img" aria-label="مخطط حي لتوزيع حالات المهام">${statuses.map((status) => {
+    const amount = Number(counts[status] || 0);
+    const width = Math.round((amount / max) * 100);
+    return `<div class="task-chart-row"><span>${esc(label(status))}</span><div class="task-chart-track"><div class="task-chart-fill ${statusClass(status)}" style="width:${width}%"></div></div><strong>${amount}</strong></div>`;
+  }).join('')}</div>`;
+}
 function renderSystemList(health) {
   const entries = Object.entries(health?.checks || {});
   return entries.map(([key, value]) => {
@@ -135,6 +144,7 @@ function renderDashboard(data) {
   const company = data.company;
   const counts = company.task_counts;
   const metrics = [
+    ['الأقسام النشطة', company.active_departments, '▦'],
     ['موظفو AI النشطون', company.active_ai_employees, '✣'],
     ['الشخصيات النشطة', company.active_characters, '◉'],
     ['المشاريع النشطة', company.active_projects, '▧'],
@@ -146,7 +156,7 @@ function renderDashboard(data) {
   ];
   const inProgress = data.recent_tasks.filter((item) => item.status === 'IN_PROGRESS');
   return `<section class="kpi-grid">${metrics.map((metric) => metricCard(...metric)).join('')}</section>
-  <section class="dashboard-grid"><article class="panel"><div class="panel-heading"><div><h2 class="panel-title">حالة الشركة</h2><div class="panel-caption">قيم من قاعدة البيانات الحالية؛ غير المتاح موسوم صراحة.</div></div>${statusBadge(data.health.overall)}</div><div class="status-count-grid">${['TODO','IN_PROGRESS','WAITING_APPROVAL','COMPLETED','CANCELLED','FAILED'].map((status) => `<div class="status-count"><span>${esc(label(status))}</span><strong>${counts[status] ?? 0}</strong></div>`).join('')}</div><div class="section-top"><h3>صحة الأنظمة</h3><button class="text-link" data-page="security">التفاصيل ←</button></div>${renderSystemList(data.health)}</article>
+  <section class="dashboard-grid"><article class="panel"><div class="panel-heading"><div><h2 class="panel-title">حالة الشركة</h2><div class="panel-caption">قيم من قاعدة البيانات الحالية؛ غير المتاح موسوم صراحة.</div></div>${statusBadge(data.health.overall)}</div><div class="status-count-grid">${['TODO','IN_PROGRESS','WAITING_APPROVAL','COMPLETED','CANCELLED','FAILED'].map((status) => `<div class="status-count"><span>${esc(label(status))}</span><strong>${counts[status] ?? 0}</strong></div>`).join('')}</div>${taskStatusChart(counts)}<div class="section-top"><h3>صحة الأنظمة</h3><button class="text-link" data-page="security">التفاصيل ←</button></div>${renderSystemList(data.health)}</article>
   <article class="panel"><div class="panel-heading"><div><h2 class="panel-title">ما يحتاج انتباهك</h2><div class="panel-caption">المهام الجارية والموافقات المعلّقة فقط</div></div></div><div class="section-top compact-section"><h3>مهام جارية (${inProgress.length})</h3><button class="text-link" data-page="tasks">كل المهام ←</button></div>${inProgress.length ? `<div class="task-list">${inProgress.map((task) => `<div class="task-row"><span class="task-priority high"></span><div class="task-content"><strong>${esc(task.title)}</strong><span>${esc(task.owner)} · ${esc(task.department || 'دون قسم')}</span></div>${statusBadge(task.status)}</div>`).join('')}</div>` : emptyState('لا توجد مهام جارية', 'لا توجد سجلات بحالة IN_PROGRESS.')}
   <div class="section-top compact-section"><h3>موافقات معلّقة (${data.pending_approvals.length})</h3><button class="text-link" data-page="approvals">مركز الموافقات ←</button></div>${data.pending_approvals.length ? approvalList(data.pending_approvals.slice(0, 4)) : emptyState('لا توجد موافقات معلّقة', 'لم تُنشأ طلبات تنتظر المالك بعد.')}</article></section>
   <section class="panel"><div class="panel-heading"><div><h2 class="panel-title">آخر النشاط</h2><div class="panel-caption">أحداث محفوظة في سجل التدقيق.</div></div><button class="text-link" data-page="activity">فتح السجل ←</button></div>${activityRows(data.recent_activity)}</section>`;
@@ -163,9 +173,38 @@ async function renderActivityPage() {
   const response = await api.activity({status: state.activityStatus, q: state.search});
   return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">سجل النشاط</h2><div class="panel-caption">كل تعديل مهم يضيف فعلاً ووقتاً ونتيجة أو خطأ.</div></div><select class="select-pill" id="activity-status-filter"><option value="">كل الحالات</option><option value="SUCCESS" ${state.activityStatus === 'SUCCESS' ? 'selected' : ''}>ناجح</option><option value="FAILURE" ${state.activityStatus === 'FAILURE' ? 'selected' : ''}>فشل</option></select></div>${activityRows(response.activity)}</section>`;
 }
-function builderPage() {
+function entityCards(items, detail, emptyTitle) {
+  if (!items.length) return emptyState(emptyTitle, 'لا توجد سجلات مطابقة في قاعدة البيانات.');
+  return `<div class="entity-grid">${items.map((item) => `<article class="panel entity-card"><div class="entity-card-head"><strong>${esc(item.name)}</strong>${statusBadge(item.status)}</div><p>${esc(detail(item) || '—')}</p></article>`).join('')}</div>`;
+}
+async function builderPage() {
+  const company = await api.company();
   const capabilities = state.builder;
-  return `<section class="panel builder-intro"><div class="feature-icon">⊞</div><div><h2 class="panel-title">أساس منشئ الشركة</h2><p>هيكل تسجيل وحدات ومراحلها موجود؛ إنشاء الأقسام والموظفين والشخصيات والتكاملات مؤجل لهذه المرحلة التالية.</p></div></section><div class="page-grid builder-grid">${capabilities.map((item) => `<article class="panel feature-card builder-capability"><div class="feature-head"><span class="feature-icon">＋</span>${statusBadge(item.state)}</div><h3>${esc(item.title)}</h3><p>نقطة تسجيل مستقبلية، غير مفعلة بعد.</p><button class="button button-quiet small-button" disabled>قريباً</button></article>`).join('')}</div><section class="panel architecture-note"><h2 class="panel-title">قابلية التوسع</h2><p>تعريفات الوحدات مركزية في <code>backend/modules.py</code>، ويمكن للوحدة اللاحقة التسجيل مع حالة تنفيذ صريحة وربط API خاص بها.</p></section>`;
+  return `<section class="panel builder-intro"><div class="feature-icon">⊞</div><div><h2 class="panel-title">البيانات التأسيسية</h2><p>القسم والموظف والشخصية والمشروع أدناه سجلات محفوظة فعلياً في SQLite؛ واجهات الإنشاء والتعديل ستُضاف لاحقاً.</p></div></section>
+  <section class="panel"><h2 class="panel-title">الأقسام</h2>${entityCards(company.departments, (item) => item.description, 'لا توجد أقسام')}</section>
+  <section class="panel"><h2 class="panel-title">موظفو الذكاء الاصطناعي</h2>${entityCards(company.ai_employees, (item) => `${item.role} · ${item.department || 'دون قسم'} · ${item.description}`, 'لا يوجد موظفون')}</section>
+  <section class="panel"><h2 class="panel-title">الشخصيات الرقمية</h2>${entityCards(company.characters, (item) => `${item.role} · ${item.description}`, 'لا توجد شخصيات')}</section>
+  <section class="panel"><h2 class="panel-title">المشاريع</h2>${entityCards(company.projects, (item) => item.description, 'لا توجد مشاريع')}</section>
+  <div class="page-grid builder-grid">${capabilities.map((item) => `<article class="panel feature-card builder-capability"><div class="feature-head"><span class="feature-icon">＋</span>${statusBadge(item.state)}</div><h3>${esc(item.title)}</h3><p>السجل التأسيسي متاح؛ واجهة إدارة هذا النوع لم تُفعّل بعد.</p><button class="button button-quiet small-button" disabled>قريباً</button></article>`).join('')}</div>`;
+}
+async function entityPage(id) {
+  const company = await api.company();
+  const config = {
+    'ai-team': ['فريق الذكاء الاصطناعي', company.ai_employees, (item) => `${item.role} · ${item.department || 'دون قسم'} · ${item.description}`],
+    characters: ['الشخصيات الرقمية', company.characters, (item) => `${item.role} · ${item.description}`],
+    projects: ['المشاريع', company.projects, (item) => item.description],
+  }[id];
+  return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">${esc(config[0])}</h2><div class="panel-caption">سجلات فعلية محفوظة في SQLite.</div></div></div>${entityCards(config[1], config[2], 'لا توجد سجلات بعد.')}</section>`;
+}
+function integrationPage(module) {
+  const key = {'ai-router': 'ai_router', manus: 'manus', github: 'github'}[module.id];
+  const status = state.health?.checks?.[key] || 'NOT_CONFIGURED';
+  const detail = module.id === 'manus'
+    ? 'يفحص الخادم واجهة Manus API عبر GET /v2/task.list?limit=1 باستخدام مفتاح الخادم؛ لا تُعرض بيانات المهام أو المفتاح في اللوحة.'
+    : module.id === 'ai-router'
+      ? 'يُظهر الفحص نتيجة نقطة /models لموجّه OpenAI-compatible، عند توفر اعتمادات الخادم.'
+      : 'يُظهر الفحص حالة GitHub API باستخدام اعتماد المضيف المهيأ دون كشف رمز الوصول.';
+  return `<section class="panel integration-page"><div class="panel-heading"><div><h2 class="panel-title">${esc(module.title)}</h2><div class="panel-caption">حالة اتصال فعلية من الخلفية.</div></div>${statusBadge(status)}</div><p>${esc(detail)}</p><p class="panel-caption">آخر فحص: ${esc(formatDate(state.health?.checked_at))}</p></section>`;
 }
 function securityPage() {
   return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">الأمان والوصول</h2><div class="panel-caption">صلاحية واحدة للمالك في هذه المرحلة؛ لا توجد حسابات أعضاء أو أدوار متعددة.</div></div>${statusBadge(state.health?.checks?.authentication || 'ERROR')}</div><div class="security-callout"><strong>${state.health?.checks?.authentication === 'ONLINE' ? 'رمز المالك مضبوط على الخادم.' : 'رمز المالك غير مهيأ.'}</strong><p>الواجهات الخاصة تتطلب OWNER_API_TOKEN عبر ترويسة X-Owner-Token. الرمز لا يُضمّن في الملفات ولا يُرسل إلى سجل النشاط. يخزنه المتصفح في sessionStorage للجلسة الحالية فقط.</p>${state.authorized ? '<button class="button button-quiet" id="logout-button">إنهاء جلسة المالك</button>' : '<button class="button button-primary" data-open-auth>إدخال رمز المالك</button>'}</div></section><section class="panel health-embed"><div class="panel-heading"><div><h2 class="panel-title">حالة النظام الفعلية</h2><div class="panel-caption">الاتصال بالخادم وSQLite مفحوص عند الطلب.</div></div><button class="button button-quiet" id="refresh-health">إعادة الفحص</button></div>${healthCards(state.health)}</section>`;
@@ -173,8 +212,10 @@ function securityPage() {
 function settingsPage() {
   return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">إعدادات التشغيل</h2><div class="panel-caption">إعدادات تُقرأ من بيئة الخادم ولا تُعرض أسرارها.</div></div></div><div class="setting-row"><div class="setting-copy"><strong>Backend API</strong><small>نفس المصدر · /api</small></div>${statusBadge(state.health?.checks?.backend || 'ERROR')}</div><div class="setting-row"><div class="setting-copy"><strong>قاعدة البيانات</strong><small>SQLite · الملف مستثنى من Git</small></div>${statusBadge(state.health?.checks?.database || 'ERROR')}</div><div class="setting-row"><div class="setting-copy"><strong>المصادقة</strong><small>OWNER_API_TOKEN من بيئة الخادم</small></div>${statusBadge(state.health?.checks?.authentication || 'NOT_CONFIGURED')}</div>${Object.entries(state.health?.checks || {}).filter(([key]) => !['backend','database','authentication'].includes(key)).map(([key,value]) => `<div class="setting-row"><div class="setting-copy"><strong>${esc(key)}</strong><small>تُضبط بمتغيرات بيئة الخادم فقط</small></div>${typeof value === 'string' ? statusBadge(value) : statusBadge('NOT_CONFIGURED')}</div>`).join('')}<p class="panel-caption">لا توجد أسرار مهيأة أو خدمات خارجية في المستودع حالياً. انظر README.md لإعدادات البيئة.</p></section>`;
 }
-function modulePage(module) {
+async function modulePage(module) {
   if (module.id === 'company-builder') return builderPage();
+  if (['ai-team', 'characters', 'projects'].includes(module.id)) return entityPage(module.id);
+  if (['ai-router', 'manus', 'github'].includes(module.id)) return integrationPage(module);
   if (module.id === 'security') return securityPage();
   if (module.id === 'settings') return settingsPage();
   const stateCode = module.state || 'NOT_CONFIGURED';
@@ -199,7 +240,7 @@ async function renderPage(page = state.page) {
   history.replaceState(null, '', `#${state.page}`);
   setHeader(state.page);
   pageContent.innerHTML = '<div class="panel loading-state"><span class="loader"></span><strong>جار تحميل بيانات الوحدة…</strong></div>';
-  if (['dashboard','tasks','approvals','activity'].includes(state.page) && !state.authorized) {
+  if (['dashboard','tasks','approvals','activity','company-builder','ai-team','characters','projects'].includes(state.page) && !state.authorized) {
     pageContent.innerHTML = accessPanel();
     return;
   }
@@ -216,7 +257,7 @@ async function renderPage(page = state.page) {
       markup = await renderActivityPage();
     } else {
       const module = state.modules.find((item) => item.id === state.page);
-      markup = modulePage(module || {id: state.page, title: 'لوحة التحكم', state: 'NOT_CONFIGURED'});
+      markup = await modulePage(module || {id: state.page, title: 'لوحة التحكم', state: 'NOT_CONFIGURED'});
     }
     if (revision !== state.renderRevision) return;
     pageContent.innerHTML = markup;

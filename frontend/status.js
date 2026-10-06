@@ -5,6 +5,7 @@ export const STATUS_LABELS = {
   COMPLETED: 'مكتمل', CANCELLED: 'ملغى', FAILED: 'فشل', APPROVED: 'تمت الموافقة',
   REJECTED: 'مرفوض', CHANGES_REQUESTED: 'مطلوب تعديل', LOW: 'منخفضة', NORMAL: 'عادية',
   HIGH: 'عالية', URGENT: 'عاجلة', SUCCESS: 'ناجح', FAILURE: 'فشل',
+  ACTIVE: 'نشط', INACTIVE: 'غير نشط', ON_HOLD: 'متوقف مؤقتاً',
 };
 
 export function label(value) {
