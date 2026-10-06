@@ -4,99 +4,100 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#10131c" />
-  <meta name="description" content="AI Media OS — مساحة تشغيل ذكية لإدارة المحتوى والإنتاج الإعلامي." />
-  <title>AI Media OS — مساحة العمل</title>
+  <meta name="description" content="AI Media OS — مركز التحكم التشغيلي للشركة." />
+  <title>AI Media OS — مركز التحكم</title>
   <link rel="stylesheet" href="./styles.css" />
-  <script defer src="./app.js"></script>
+  <script type="module" src="./frontend/app.js"></script>
 </head>
 <body>
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
-      <a class="brand" href="#overview" aria-label="AI Media OS الرئيسية">
+      <a class="brand" href="#dashboard" aria-label="AI Media OS الرئيسية">
         <span class="brand-mark"><span></span><span></span><span></span></span>
         <span class="brand-copy"><strong>AI MEDIA</strong><small>OPERATING SYSTEM</small></span>
       </a>
       <div class="workspace-switcher">
-        <div class="workspace-avatar">N</div>
-        <div class="workspace-info"><strong>Northstar Studio</strong><span>مساحة العمل</span></div>
-        <button class="icon-button tiny" aria-label="تبديل مساحة العمل" data-toast="مساحة العمل الحالية: Northstar Studio">⌄</button>
+        <div class="workspace-avatar">AI</div>
+        <div class="workspace-info"><strong>AI Media Company</strong><span>مركز التحكم</span></div>
+        <span class="workspace-state" id="workspace-state">…</span>
       </div>
-      <div class="nav-label">مساحة العمل</div>
-      <nav class="primary-nav" aria-label="التنقل الرئيسي">
-        <button class="nav-item active" data-page="overview"><span class="nav-icon">◫</span><span>نظرة عامة</span></button>
-        <button class="nav-item" data-page="content"><span class="nav-icon">▤</span><span>استوديو المحتوى</span><span class="nav-count" id="draft-count">4</span></button>
-        <button class="nav-item" data-page="library"><span class="nav-icon">▧</span><span>مكتبة الوسائط</span></button>
-        <button class="nav-item" data-page="calendar"><span class="nav-icon">▦</span><span>تقويم النشر</span></button>
-        <button class="nav-item" data-page="analytics"><span class="nav-icon">⌁</span><span>التحليلات</span></button>
-      </nav>
-      <div class="nav-label second-label">الإدارة</div>
-      <nav class="primary-nav" aria-label="أدوات الإدارة">
-        <button class="nav-item" data-page="workflows"><span class="nav-icon">⤳</span><span>سير العمل</span><span class="status-dot"></span></button>
-        <button class="nav-item" data-page="team"><span class="nav-icon">♧</span><span>الفريق</span></button>
-        <button class="nav-item" data-page="settings"><span class="nav-icon">⚙</span><span>الإعدادات</span></button>
-      </nav>
+      <nav class="primary-nav module-nav" id="sidebar-navigation" aria-label="أقسام النظام"></nav>
       <div class="sidebar-bottom">
-        <div class="usage-card">
-          <div class="usage-head"><span>رصيد الإنتاج</span><span class="usage-badge">تجريبي</span></div>
-          <strong><b>72</b> / 100 نقطة</strong>
-          <div class="usage-track"><span></span></div>
-          <small>يتجدد الرصيد في بداية الشهر</small>
+        <div class="usage-card health-summary-card">
+          <div class="usage-head"><span>صحة النظام</span><span class="usage-badge" id="overall-health-badge">جار الفحص</span></div>
+          <div id="sidebar-health" class="sidebar-health-list"><span class="loading-inline">جار التحقق من الخدمات…</span></div>
+          <button class="text-link" data-page="security">عرض التفاصيل ←</button>
         </div>
-        <button class="profile-button" data-page="settings">
-          <span class="profile-avatar">YS</span>
-          <span class="profile-text"><strong>Yaslam S.</strong><small>مدير مساحة العمل</small></span>
-          <span class="profile-more">···</span>
+        <button class="profile-button" id="owner-profile" type="button">
+          <span class="profile-avatar">OW</span>
+          <span class="profile-text"><strong>المالك</strong><small id="auth-state-label">المصادقة غير مهيأة</small></span>
+          <span class="profile-more">⌑</span>
         </button>
       </div>
     </aside>
+    <div class="mobile-scrim" id="mobile-scrim"></div>
 
     <main class="main-area">
       <header class="topbar">
         <div class="topbar-leading">
           <button class="icon-button mobile-menu" id="mobile-menu" aria-label="فتح القائمة">☰</button>
-          <div class="breadcrumb"><span>مساحة العمل</span><span class="crumb-slash">/</span><strong id="breadcrumb-current">نظرة عامة</strong></div>
+          <div class="breadcrumb"><span>مركز التحكم</span><span class="crumb-slash">/</span><strong id="breadcrumb-current">لوحة التحكم</strong></div>
         </div>
         <div class="topbar-actions">
-          <label class="search-box" for="global-search"><span class="search-symbol">⌕</span><input id="global-search" type="search" placeholder="ابحث عن محتوى أو مشروع..." autocomplete="off" /><kbd>⌘ K</kbd></label>
-          <button class="icon-button notification-button" id="notifications-button" aria-label="الإشعارات"><span>♧</span><i></i></button>
-          <span class="topbar-divider"></span>
-          <button class="date-chip" id="today-chip" aria-label="تاريخ اليوم"><span class="calendar-symbol">▦</span><span id="today-label"></span></button>
+          <label class="search-box" for="global-search"><span class="search-symbol">⌕</span><input id="global-search" type="search" placeholder="ابحث في الوحدة الحالية…" autocomplete="off" /><kbd>⌘ K</kbd></label>
+          <button class="button button-quiet owner-auth-button" id="auth-button" type="button"><span id="auth-button-icon">◇</span><span id="auth-button-label">تهيئة الوصول</span></button>
         </div>
       </header>
 
       <div class="page-wrap">
         <section class="page-heading">
           <div>
-            <div class="eyebrow"><span class="eyebrow-dot"></span><span id="heading-eyebrow">الثلاثاء، ٦ أكتوبر ٢٠٢٦</span></div>
-            <h1 id="page-title">صباح الإبداع، ياسلم <span class="wave">✳</span></h1>
-            <p id="page-subtitle">هذه لمحة عن نبض الاستوديو وما ينتظر إطلاقه اليوم.</p>
+            <div class="eyebrow"><span class="eyebrow-dot" id="page-status-dot"></span><span id="heading-eyebrow">مركز التحكم التشغيلي</span></div>
+            <h1 id="page-title">لوحة التحكم</h1>
+            <p id="page-subtitle">حالة الشركة والأنظمة والمهام التي تحتاج إلى انتباهك.</p>
           </div>
-          <div class="heading-actions">
-            <button class="button button-quiet" id="invite-button"><span class="button-icon">＋</span> دعوة عضو</button>
-            <button class="button button-primary" id="new-content-button"><span class="button-icon">＋</span> محتوى جديد</button>
-          </div>
+          <div class="heading-actions" id="heading-actions"></div>
         </section>
-
-        <div id="page-content" aria-live="polite"></div>
-        <footer class="page-footer"><span><i class="live-dot"></i> مساحة العمل تعمل بشكل طبيعي</span><span>AI MEDIA OS <b>·</b> معاينة محلية — البيانات محفوظة على هذا الجهاز</span></footer>
+        <div id="global-message" class="global-message" hidden></div>
+        <div id="page-content" aria-live="polite"><div class="panel loading-state"><span class="loader"></span><strong>جار التحقق من الخادم وقاعدة البيانات…</strong></div></div>
+        <footer class="page-footer"><span id="footer-health"><i class="live-dot"></i> جار التحقق من حالة الخدمات</span><span>AI MEDIA OS <b>·</b> بيانات فعلية فقط · تخزين SQLite محلي</span></footer>
       </div>
     </main>
   </div>
 
-  <div class="overlay" id="modal-overlay" hidden>
-    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-      <div class="modal-head"><div><span class="modal-kicker">AI MEDIA OS</span><h2 id="modal-title">إنشاء محتوى جديد</h2></div><button class="icon-button" id="close-modal" aria-label="إغلاق">×</button></div>
-      <form id="content-form">
-        <label class="field-label" for="content-title">عنوان المحتوى</label>
-        <input class="text-field" id="content-title" name="title" placeholder="مثال: إطلاق حملة الخريف" required maxlength="90" />
-        <div class="form-row">
-          <label class="field-group"><span class="field-label">نوع المحتوى</span><select class="text-field" name="type"><option>منشور اجتماعي</option><option>فيديو قصير</option><option>مقال</option><option>حملة إعلانية</option></select></label>
-          <label class="field-group"><span class="field-label">الحالة</span><select class="text-field" name="status"><option value="draft">مسودة</option><option value="production">قيد الإنتاج</option><option value="review">بانتظار المراجعة</option></select></label>
-        </div>
-        <label class="field-label" for="content-channel">القناة</label>
-        <select class="text-field" id="content-channel" name="channel"><option>Instagram</option><option>TikTok</option><option>YouTube</option><option>LinkedIn</option><option>مدونة الموقع</option></select>
-        <div class="form-actions"><button type="button" class="button button-quiet" id="cancel-modal">إلغاء</button><button class="button button-primary" type="submit">إضافة إلى مساحة العمل <span>←</span></button></div>
+  <div class="overlay" id="auth-overlay" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+      <div class="modal-head"><div><span class="modal-kicker">حماية مساحة العمل</span><h2 id="auth-title">دخول المالك</h2></div><button class="icon-button" data-close="auth-overlay" aria-label="إغلاق">×</button></div>
+      <p class="modal-help">تستخدم الواجهة رمز وصول للمالك. لا يوجد رمز مضبوط في هذا المشروع بعد؛ عيّن <code>OWNER_API_TOKEN</code> على الخادم أولاً. لا يُحفظ الرمز في ملفات الموقع.</p>
+      <form id="auth-form"><label class="field-label" for="owner-token-input">رمز المالك</label><input class="text-field" id="owner-token-input" type="password" autocomplete="off" minlength="24" placeholder="أدخله بعد ضبطه على الخادم" /><div id="auth-error" class="form-error" hidden></div><div class="form-actions"><button type="button" class="button button-quiet" id="clear-token-button">مسح الجلسة</button><button class="button button-primary" type="submit">التحقق والدخول</button></div></form>
+    </section>
+  </div>
+
+  <div class="overlay" id="task-overlay" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
+      <div class="modal-head"><div><span class="modal-kicker">مركز المهام</span><h2 id="task-modal-title">إنشاء مهمة</h2></div><button class="icon-button" data-close="task-overlay" aria-label="إغلاق">×</button></div>
+      <form id="task-form">
+        <label class="field-label" for="task-title">العنوان</label><input class="text-field" id="task-title" name="title" required maxlength="180" />
+        <label class="field-label" for="task-description">الوصف</label><textarea class="text-field textarea-field" id="task-description" name="description" maxlength="4000"></textarea>
+        <div class="form-row"><label class="field-group"><span class="field-label">المسؤول</span><input class="text-field" name="owner" value="المالك" maxlength="120" /></label><label class="field-group"><span class="field-label">موظف الذكاء الاصطناعي</span><input class="text-field" name="assigned_employee" placeholder="اختياري" maxlength="120" /></label></div>
+        <div class="form-row"><label class="field-group"><span class="field-label">القسم</span><input class="text-field" name="department" placeholder="اختياري" maxlength="120" /></label><label class="field-group"><span class="field-label">الأولوية</span><select class="text-field" name="priority"><option value="NORMAL">عادية</option><option value="LOW">منخفضة</option><option value="HIGH">عالية</option><option value="URGENT">عاجلة</option></select></label></div>
+        <label class="field-label" for="task-status">الحالة</label><select class="text-field" id="task-status" name="status"><option value="TODO">قيد الانتظار</option><option value="IN_PROGRESS">قيد التنفيذ</option><option value="WAITING_APPROVAL">بانتظار الموافقة</option><option value="COMPLETED">مكتمل</option><option value="CANCELLED">ملغى</option><option value="FAILED">فشل</option></select>
+        <div class="form-error" id="task-error" hidden></div><div class="form-actions"><button type="button" class="button button-quiet" data-close="task-overlay">إلغاء</button><button class="button button-primary" type="submit">حفظ المهمة</button></div>
       </form>
+    </section>
+  </div>
+
+  <div class="overlay" id="approval-overlay" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="approval-modal-title">
+      <div class="modal-head"><div><span class="modal-kicker">مركز الموافقات</span><h2 id="approval-modal-title">إضافة طلب موافقة</h2></div><button class="icon-button" data-close="approval-overlay" aria-label="إغلاق">×</button></div>
+      <form id="approval-form"><label class="field-label" for="approval-title">عنوان الطلب</label><input class="text-field" id="approval-title" name="title" required maxlength="180" /><label class="field-label" for="approval-description">التفاصيل</label><textarea class="text-field textarea-field" id="approval-description" name="description" maxlength="4000"></textarea><div class="form-error" id="approval-error" hidden></div><div class="form-actions"><button type="button" class="button button-quiet" data-close="approval-overlay">إلغاء</button><button class="button button-primary" type="submit">إرسال للمراجعة</button></div></form>
+    </section>
+  </div>
+
+  <div class="overlay" id="decision-overlay" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="decision-title">
+      <div class="modal-head"><div><span class="modal-kicker">قرار المالك</span><h2 id="decision-title">طلب تعديلات</h2></div><button class="icon-button" data-close="decision-overlay" aria-label="إغلاق">×</button></div>
+      <form id="decision-form"><input type="hidden" name="approvalId" /><label class="field-label" for="decision-note">ملاحظة القرار</label><textarea class="text-field textarea-field" id="decision-note" name="note" maxlength="2000" placeholder="اشرح التعديلات المطلوبة…"></textarea><div class="form-error" id="decision-error" hidden></div><div class="form-actions"><button type="button" class="button button-quiet" data-close="decision-overlay">إلغاء</button><button class="button button-primary" type="submit">حفظ القرار</button></div></form>
     </section>
   </div>
   <div class="toast-region" id="toast-region" aria-live="polite"></div>
