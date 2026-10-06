@@ -9,6 +9,7 @@ MODULES = [
     {"id": "ai-router", "title": "موجّه النماذج", "group": "أنظمة الذكاء الاصطناعي", "icon": "⌘", "state": "NOT_CONFIGURED"},
     {"id": "manus", "title": "Manus", "group": "أنظمة الذكاء الاصطناعي", "icon": "M", "state": "NOT_CONFIGURED"},
     {"id": "github", "title": "GitHub", "group": "أنظمة الذكاء الاصطناعي", "icon": "⌘", "state": "NOT_CONFIGURED"},
+    {"id": "external-integrations", "title": "التكاملات الخارجية", "group": "التكاملات", "icon": "⇄", "state": "READY"},
     {"id": "characters", "title": "الشخصيات", "group": "الشخصيات والمحتوى", "icon": "◉", "state": "NOT_CONFIGURED"},
     {"id": "character-bibles", "title": "أدلة الشخصيات", "group": "الشخصيات والمحتوى", "icon": "▤", "state": "NOT_CONFIGURED"},
     {"id": "localization", "title": "التوطين", "group": "الشخصيات والمحتوى", "icon": "文", "state": "COMING_SOON"},
@@ -39,5 +40,5 @@ BUILDER_CAPABILITIES = [
     {"id": "tool", "title": "إضافة أداة", "state": "READY"},
     {"id": "knowledge-source", "title": "إضافة مصدر معرفة", "state": "READY"},
     {"id": "model", "title": "إضافة نموذج ذكاء اصطناعي", "state": "COMING_SOON"},
-    {"id": "integration", "title": "إضافة تكامل", "state": "COMING_SOON"},
+    {"id": "integration", "title": "إضافة تكامل", "state": "READY"},
 ]

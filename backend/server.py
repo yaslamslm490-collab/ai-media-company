@@ -34,6 +34,8 @@ from backend.store import (
     TASK_STATUSES,
     Store,
 )
+from backend.integrations import IntegrationProblem, IntegrationStore
+from backend.media_generators import MediaGenerator
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_BODY = 1_000_000
@@ -281,6 +283,9 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
     store.initialize()
     company_store = CompanyBuilderStore(store)
     company_store.initialize()
+    integration_store = IntegrationStore(store)
+    integration_store.initialize()
+    media_generator = MediaGenerator(integration_store)
 
     class Handler(SimpleHTTPRequestHandler):
         server_version = "AI-Media-OS/1.0"
@@ -343,6 +348,12 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             except ApiProblem as problem:
                 self._log_failure(problem.code, problem.message)
                 self._send_json(problem.status, {"error": {"code": problem.code, "message": problem.message}})
+            except IntegrationProblem as problem:
+                self._log_failure(problem.code, problem.message)
+                envelope = {"error": {"code": problem.code, "message": problem.message}}
+                if problem.details:
+                    envelope["error"]["details"] = problem.details
+                self._send_json(problem.status, envelope)
             except ValueError as error:
                 code = str(error)
                 messages = {
@@ -395,7 +406,37 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
         def do_GET(self) -> None:
             if not self._api():
                 return self._serve_static(include_body=True)
+            media_match = re.fullmatch(r"/api/external-integrations/generations/([a-f0-9]{32})/(audio|media)", urllib.parse.urlsplit(self.path).path)
+            if media_match:
+                return self._serve_generated_media(media_match.group(1), media_match.group(2))
             self._run(self._get_api)
+
+        def _serve_generated_media(self, generation_id: str, media_kind: str) -> None:
+            try:
+                self._authenticate()
+                media = media_generator.media_path(generation_id, media_kind)
+                if media is None:
+                    raise ApiProblem(404, "media_not_found", "ملف الوسائط غير متوفر أو انتهت صلاحيته المحلية.")
+                path, content_type = media
+                size = path.stat().st_size
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(size))
+                self.send_header("Cache-Control", "private, no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Disposition", "inline")
+                self.end_headers()
+                with path.open("rb") as stream:
+                    while chunk := stream.read(1024 * 1024):
+                        self.wfile.write(chunk)
+            except ApiProblem as problem:
+                self._log_failure(problem.code, problem.message)
+                self._send_json(problem.status, {"error": {"code": problem.code, "message": problem.message}})
+            except IntegrationProblem as problem:
+                self._log_failure(problem.code, problem.message)
+                self._send_json(problem.status, {"error": {"code": problem.code, "message": problem.message}})
+            except OSError:
+                self._send_json(404, {"error": {"code": "media_not_found", "message": "ملف الوسائط غير متوفر."}})
 
         def do_HEAD(self) -> None:
             if self._api():
@@ -499,6 +540,11 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 return {"permissions": company_store.list_permissions()}
             if path == "/api/tools":
                 return {"tools": company_store.list_tools()}
+            if path == "/api/external-integrations":
+                return integration_store.snapshot()
+            generation_match = re.fullmatch(r"/api/external-integrations/generations/([a-f0-9]{32})", path)
+            if generation_match:
+                return media_generator.poll_generation(generation_match.group(1), "owner")
             if path == "/api/knowledge-sources":
                 return {"knowledge_sources": company_store.list_knowledge_sources()}
             if path == "/api/workflows":
@@ -542,6 +588,43 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             path = urllib.parse.urlsplit(self.path).path
             actor = self._authenticate()
             payload = self._body()
+            integration_test_match = re.fullmatch(r"/api/external-integrations/accounts/([a-f0-9]{32})/test", path)
+            if integration_test_match:
+                if payload:
+                    raise ApiProblem(400, "unexpected_body", "لا يحتاج فحص الاتصال إلى بيانات إضافية.")
+                result = integration_store.test_connection(integration_test_match.group(1), actor)
+                if result is None:
+                    raise ApiProblem(404, "external_account_not_found", "الحساب الخارجي غير موجود.")
+                return result
+            if path == "/api/external-integrations/generate/audio":
+                allowed = {"voice_id", "text", "model_id", "output_format"}
+                if set(payload) - allowed:
+                    raise IntegrationProblem(400, "invalid_fields", "طلب توليد الصوت يحتوي حقولاً غير مدعومة.")
+                result = media_generator.generate_audio(payload, actor)
+                return {"generation": result}
+            if path == "/api/external-integrations/generate/video":
+                allowed = {"prompt", "duration", "aspect_ratio", "resolution", "audio"}
+                if set(payload) - allowed:
+                    raise IntegrationProblem(400, "invalid_fields", "طلب توليد الفيديو يحتوي حقولاً غير مدعومة.")
+                result = media_generator.generate_video(payload, actor)
+                return {"generation": result}
+            if path == "/api/external-integrations/pipeline":
+                allowed = {"script_text", "visual_prompt", "voice_id", "model_id", "output_format", "duration", "aspect_ratio", "resolution"}
+                if set(payload) - allowed:
+                    raise IntegrationProblem(400, "invalid_fields", "طلب أنبوب الإنتاج يحتوي حقولاً غير مدعومة.")
+                result = media_generator.execute_pipeline(payload, actor)
+                return {"generation": result}
+            if path == "/api/external-integrations/accounts":
+                _reject_secret_material(*(payload.get(key) for key in ("label", "provider", "service", "status")))
+                account = integration_store.create_account(payload, actor)
+                self._send_json(201, {"account": account})
+                return None
+            if path == "/api/external-integrations/rotate":
+                if set(payload) != {"provider", "service"}:
+                    raise ApiProblem(400, "invalid_fields", "يلزم إرسال اسم المزود ونوع الخدمة فقط.")
+                _reject_secret_material(payload.get("provider"), payload.get("service"))
+                account = integration_store.rotate_next(payload.get("service"), payload.get("provider"), actor)
+                return {"account": account}
             _reject_secret_material(*payload.values())
             if path == "/api/departments":
                 name = _bounded_text(payload, "name", required=True, maximum=180)
@@ -711,6 +794,13 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             path = urllib.parse.urlsplit(self.path).path
             actor = self._authenticate()
             payload = self._body()
+            integration_match = re.fullmatch(r"/api/external-integrations/accounts/([a-f0-9]{32})", path)
+            if integration_match:
+                _reject_secret_material(*(value for key, value in payload.items() if key != "credential"))
+                account = integration_store.update_account(integration_match.group(1), payload, actor)
+                if account is None:
+                    raise ApiProblem(404, "external_account_not_found", "الحساب الخارجي غير موجود.")
+                return {"account": account}
             _reject_secret_material(*payload.values())
             role_match = re.fullmatch(r"/api/roles/([A-Za-z0-9_-]{1,80})", path)
             if role_match:
@@ -780,6 +870,11 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
         def _delete_api(self) -> dict[str, Any]:
             path = urllib.parse.urlsplit(self.path).path
             actor = self._authenticate()
+            integration_match = re.fullmatch(r"/api/external-integrations/accounts/([a-f0-9]{32})", path)
+            if integration_match:
+                if not integration_store.delete_account(integration_match.group(1), actor):
+                    raise ApiProblem(404, "external_account_not_found", "الحساب الخارجي غير موجود.")
+                return {"deleted": True}
             role_match = re.fullmatch(r"/api/roles/([A-Za-z0-9_-]{1,80})", path)
             if role_match:
                 if not company_store.delete_role(role_match.group(1),actor):

@@ -1,5 +1,7 @@
 export const STATUS_LABELS = {
   ONLINE: 'متصل', OFFLINE: 'غير متصل', NOT_CONFIGURED: 'غير مهيأ', ERROR: 'خطأ',
+  NOT_CHECKED: 'لم يُفحص', AUTH_ERROR: 'اعتماد مرفوض', RATE_LIMITED: 'مقيّد مؤقتاً', CREDITS_EXHAUSTED: 'نفاد الرصيد',
+  NETWORK_ERROR: 'خطأ اتصال', UPSTREAM_ERROR: 'خطأ من المزود',
   COMING_SOON: 'قريباً', READY: 'جاهز', FOUNDATION: 'الأساس متاح',
   TODO: 'قيد الانتظار', IN_PROGRESS: 'قيد التنفيذ', WAITING_APPROVAL: 'بانتظار الموافقة',
   COMPLETED: 'مكتمل', CANCELLED: 'ملغى', FAILED: 'فشل', APPROVED: 'تمت الموافقة',

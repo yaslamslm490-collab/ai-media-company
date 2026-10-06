@@ -209,16 +209,45 @@ function integrationPage(module) {
       : 'يُظهر الفحص حالة GitHub API باستخدام اعتماد المضيف المهيأ دون كشف رمز الوصول.';
   return `<section class="panel integration-page"><div class="panel-heading"><div><h2 class="panel-title">${esc(module.title)}</h2><div class="panel-caption">حالة اتصال فعلية من الخلفية.</div></div>${statusBadge(status)}</div><p>${esc(detail)}</p><p class="panel-caption">آخر فحص: ${esc(formatDate(state.health?.checked_at))}</p></section>`;
 }
+async function externalIntegrationsPage() {
+  const data = await api.externalIntegrations();
+  const accounts = data.accounts || [];
+  const generations = data.generations || [];
+  const summary = data.summary || {total_accounts: 0, active_accounts: 0, max_accounts: 20, active_by_service: {VIDEO: 0, AUDIO: 0}, providers: []};
+  const adapters = data.generation_adapters || {};
+  const canPipeline = adapters.VIDEO === 'READY' && adapters.AUDIO === 'READY';
+  const servicesText = (services) => (services || []).map((service) => service === 'VIDEO' ? 'فيديو' : 'صوت').join(' + ');
+  const rows = accounts.length ? `<div class="table-wrap"><table class="content-table integration-accounts-table"><thead><tr><th>الحساب / المزود</th><th>الخدمة</th><th>التفعيل</th><th>اتصال API / سبب التوقف</th><th>التدوير</th><th>تغيير المفتاح</th><th>إجراءات</th></tr></thead><tbody>${accounts.map((account) => `<tr><td><strong>${esc(account.label)}</strong><div class="content-subtitle">${esc(account.provider)} · ${esc(account.id.slice(0, 8))}</div></td><td>${esc(servicesText(account.services))}</td><td>${statusBadge(account.status)}${account.pause_reason ? `<div class="content-subtitle">${esc(label(account.pause_reason))}${account.pause_until ? ` · حتى ${esc(formatDate(account.pause_until))}` : ''}</div>` : ''}</td><td>${statusBadge(account.connection_status || 'NOT_CHECKED')}<div class="content-subtitle">${esc(account.connection_message || '')}</div>${account.last_checked_at ? `<div class="content-subtitle">آخر فحص: ${esc(formatDate(account.last_checked_at))}</div>` : ''}</td><td>فيديو: ${Number(account.rotation_count?.VIDEO || 0)}<br>صوت: ${Number(account.rotation_count?.AUDIO || 0)}</td><td><form class="credential-rotation-form" data-integration-form="credential" data-account-id="${esc(account.id)}"><input type="password" name="credential" minlength="8" maxlength="8192" autocomplete="new-password" aria-label="مفتاح جديد لحساب ${esc(account.label)}" placeholder="مفتاح جديد" required><button class="button button-quiet small-button" type="submit">استبدال</button></form></td><td><div class="integration-row-actions"><button class="button button-quiet small-button" type="button" data-integration-action="test" data-account-id="${esc(account.id)}">فحص API</button><button class="button button-quiet small-button" type="button" data-integration-action="toggle" data-account-id="${esc(account.id)}" data-status="${account.status === 'ACTIVE' ? 'PAUSED' : 'ACTIVE'}">${account.status === 'ACTIVE' ? 'إيقاف' : 'تفعيل'}</button><button class="button button-quiet small-button danger-button" type="button" data-integration-action="delete" data-account-id="${esc(account.id)}">حذف</button></div></td></tr>`).join('')}</tbody></table></div>` : emptyState('لا توجد حسابات محفوظة', 'أضف حساب Kling للفيديو أو ElevenLabs للصوت لبدء إدارة المجموعة.');
+  const providers = [...new Set(accounts.map((account) => account.provider))].sort((a, b) => a.localeCompare(b, 'ar'));
+  const rotationCards = providers.map((provider) => {
+    const providerAccounts = accounts.filter((account) => account.provider.toLocaleLowerCase() === provider.toLocaleLowerCase());
+    const actions = ['VIDEO', 'AUDIO'].map((service) => {
+      const count = providerAccounts.filter((account) => account.status === 'ACTIVE' && account.services.includes(service)).length;
+      return count ? `<button class="button button-quiet" type="button" data-integration-action="rotate" data-provider="${esc(provider)}" data-service="${service}">اختيار حساب ${service === 'VIDEO' ? 'الفيديو' : 'الصوت'} التالي · ${count}</button>` : '';
+    }).join('');
+    const providerStatus = providerAccounts.some((account) => account.connection_status === 'ONLINE') ? 'ONLINE' : 'NOT_CONFIGURED';
+    return `<article class="panel integration-provider-card"><div class="panel-heading"><div><h3 class="panel-title">${esc(provider)}</h3><div class="panel-caption">${providerAccounts.length} حساباً في هذا المزود</div></div>${statusBadge(providerStatus)}</div><div class="integration-row-actions">${actions || '<span class="panel-caption">لا توجد حسابات نشطة قابلة للتدوير.</span>'}</div></article>`;
+  }).join('');
+  const adapterCards = [['VIDEO', 'Kling · فيديو'], ['AUDIO', 'ElevenLabs · صوت']].map(([key, title]) => `<div class="integration-metric"><span>${title}</span>${statusBadge(adapters[key] || 'NOT_CONFIGURED')}</div>`).join('');
+  const atCapacity = summary.total_accounts >= summary.max_accounts;
+  const generationRows = generations.length ? generations.map((job) => {
+    const paused = (job.paused_accounts || []).map((item) => `${esc(item.label)} (${esc(label(item.reason))})`).join('، ');
+    const controls = [job.audio_url ? `<button class="button button-quiet small-button" type="button" data-generation-action="audio" data-generation-id="${esc(job.id)}">تشغيل الصوت</button>` : '', job.output_url ? `<button class="button button-quiet small-button" type="button" data-generation-action="media" data-generation-id="${esc(job.id)}">معاينة الملف النهائي</button>` : '', job.video_url ? `<a class="button button-quiet small-button" href="${esc(job.video_url)}" target="_blank" rel="noopener noreferrer">رابط Kling المؤقت</a>` : '', job.status === 'PROCESSING' ? `<button class="button button-quiet small-button" type="button" data-generation-action="poll" data-generation-id="${esc(job.id)}">فحص حالة Kling</button>` : ''].join('');
+    return `<article class="generation-row"><div class="generation-job-heading"><div><strong>${esc(job.kind === 'PIPELINE' ? 'أنبوب صوت + فيديو' : job.kind === 'AUDIO' ? 'توليد صوت' : 'توليد فيديو')}</strong><div class="content-subtitle">${esc(job.id.slice(0, 8))} · ${esc(formatDate(job.created_at))}</div></div>${statusBadge(job.status)}</div><p class="generation-prompt">${esc(job.prompt || '')}</p>${job.error_message ? `<p class="generation-error">${esc(job.error_message)}</p>` : ''}${paused ? `<p class="generation-notice">أُوقف تلقائياً وتم التدوير: ${paused}</p>` : ''}<div class="integration-row-actions">${controls}</div><div class="generation-player" data-generation-player="${esc(job.id)}"></div></article>`;
+  }).join('') : emptyState('لا توجد عمليات توليد بعد', 'ستظهر هنا المهام الفعلية وحالة كل حساب ومخرجاته.');
+  return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">مولدات الوسائط والحسابات</h2><div class="panel-caption">تكاملات Kling للفيديو وElevenLabs للصوت · مجموعة آمنة حتى ${summary.max_accounts} حساباً.</div></div>${statusBadge(accounts.length ? 'READY' : 'NOT_CONFIGURED')}</div><div class="integration-metrics">${adapterCards}<div class="integration-metric"><span>إجمالي الحسابات</span><strong>${summary.total_accounts} / ${summary.max_accounts}</strong></div><div class="integration-metric"><span>نشطة للفيديو / الصوت</span><strong>${summary.active_by_service?.VIDEO || 0} / ${summary.active_by_service?.AUDIO || 0}</strong></div></div><div class="integration-notice"><strong>سلوك التوليد:</strong> لا يُرسل أي طلب مدفوع إلا عند إرسال النموذج. إذا أعاد مزود التوليد 429 أو نفاد رصيد/حزمة أو رفض المفتاح، يُوقف الحساب في SQLite ثم يُجرّب كل حساب نشط بديل مرة واحدة كحد أقصى. أخطاء الشبكة أو المدخلات لا تؤدي إلى إعادة طلب تلقائي. يُنتج Kling الفيديو ثم يدمج الخادم ملف ElevenLabs محلياً باستخدام FFmpeg؛ لا يدعم مسار Text-to-Video تمرير audioUrl مباشرة، ولا تُنفذ مزامنة شفاه. يُحفظ الصوت والملف النهائي محلياً؛ رابط Kling الخارجي مؤقت حتى 30 يوماً.</div></section><section class="panel"><div class="panel-heading"><div><h2 class="panel-title">إنشاء صوت + فيديو</h2><div class="panel-caption">أنبوب تنفيذي متسلسل: ElevenLabs أولاً، ثم Kling، ثم دمج الصوت مع الفيديو محلياً.</div></div></div><form class="generation-form" data-generation-form="pipeline"><label class="field-group"><span class="field-label">معرّف صوت ElevenLabs</span><input name="voice_id" maxlength="120" required placeholder="Voice ID من مكتبة ElevenLabs"></label><label class="field-group"><span class="field-label">نموذج الصوت</span><input name="model_id" maxlength="100" value="eleven_multilingual_v2" required></label><label class="field-group generation-wide"><span class="field-label">النص المنطوق</span><textarea name="script_text" maxlength="5000" required rows="5" placeholder="النص الذي سيُحوّل إلى تعليق صوتي"></textarea></label><label class="field-group generation-wide"><span class="field-label">وصف المشهد المرئي لـ Kling (حتى 3072 محرفاً)</span><textarea name="visual_prompt" maxlength="3072" required rows="4" placeholder="صف المشهد والحركة والأسلوب والكاميرا"></textarea></label><label class="field-group"><span class="field-label">مدة الفيديو المولّد</span><select name="duration"><option value="5">5 ثوانٍ</option><option value="10">10 ثوانٍ</option><option value="15">15 ثانية</option></select></label><label class="field-group"><span class="field-label">الدقة</span><select name="resolution"><option value="720p">720p</option><option value="1080p">1080p</option><option value="4k">4K</option></select></label><label class="field-group"><span class="field-label">نسبة الأبعاد</span><select name="aspect_ratio"><option value="16:9">16:9 أفقي</option><option value="9:16">9:16 عمودي</option><option value="1:1">1:1 مربع</option></select></label><div class="generation-warning generation-wide">قد يستهلك الطلب رصيداً من ElevenLabs وKling. إذا كان الصوت أطول من الفيديو، يمدد الدمج آخر إطار ثابتاً حتى نهاية التعليق. لا توجد مزامنة شفاه تلقائية. ${(canPipeline ? '' : 'أضف حساباً نشطاً مهيأً لكل من ElevenLabs وKling لتفعيل النموذج.')}</div><div class="integration-form-actions generation-wide"><button class="button button-primary" type="submit" ${canPipeline ? '' : 'disabled'}>إنشاء الأنبوب</button><span class="panel-caption">سيظهر الحساب الموقوف وسبب التدوير في سجل الإنتاج.</span></div></form></section><section class="panel"><div class="panel-heading"><div><h2 class="panel-title">سجل الإنتاج</h2><div class="panel-caption">مهام محفوظة في SQLite والملفات في مجلد الخادم المستثنى من Git.</div></div></div><div class="generation-list">${generationRows}</div></section><section class="panel"><div class="panel-heading"><div><h2 class="panel-title">إضافة حساب</h2><div class="panel-caption">أدخل مفتاح API مرة واحدة؛ يُشفّر ولا يُعرض بعد الحفظ.</div></div><span class="text-pill">${summary.total_accounts} / ${summary.max_accounts}</span></div><form class="integration-account-form" data-integration-form="create"><label class="field-group"><span class="field-label">اسم تعريفي</span><input name="label" maxlength="120" autocomplete="off" required placeholder="مثال: حساب إنتاج 01"></label><label class="field-group"><span class="field-label">مزود الخدمة</span><select name="provider" required data-provider-choice><option value="Kling">Kling</option><option value="ElevenLabs">ElevenLabs</option></select></label><label class="field-group"><span class="field-label">نوع الخدمة</span><input type="hidden" name="service" value="VIDEO"><span class="text-pill provider-service-label" data-provider-service-label>فيديو</span></label><label class="field-group integration-secret-field"><span class="field-label">مفتاح API (يُرسل إلى مزوده الرسمي فقط)</span><input type="password" name="credential" minlength="8" maxlength="8192" autocomplete="new-password" required placeholder="لن يُعرض بعد الحفظ"></label><div class="integration-form-actions"><button class="button button-primary" type="submit" ${atCapacity ? 'disabled' : ''}>＋ حفظ الحساب مشفراً</button><span class="panel-caption">${atCapacity ? 'اكتملت السعة؛ احذف حساباً قبل إضافة آخر.' : 'استخدم مفاتيح تملكها أو لديك تصريح باستخدامها.'}</span></div></form></section><section class="panel"><div class="panel-heading"><div><h2 class="panel-title">الحسابات المحفوظة</h2><div class="panel-caption">بيانات فعلية من SQLite؛ المفاتيح لا تُعرض.</div></div></div>${rows}</section>${rotationCards ? `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">اختيار الحساب التالي يدوياً</h2><div class="panel-caption">يحدّث مؤشر Round-robin فقط؛ لا يرسل طلب توليد.</div></div></div><div class="integration-provider-grid">${rotationCards}</div></section>` : ''}`;
+}
 function securityPage() {
   return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">الأمان والوصول</h2><div class="panel-caption">صلاحية واحدة للمالك في هذه المرحلة؛ لا توجد حسابات أعضاء أو أدوار متعددة.</div></div>${statusBadge(state.health?.checks?.authentication || 'ERROR')}</div><div class="security-callout"><strong>${state.health?.checks?.authentication === 'ONLINE' ? 'رمز المالك مضبوط على الخادم.' : 'رمز المالك غير مهيأ.'}</strong><p>الواجهات الخاصة تتطلب OWNER_API_TOKEN عبر ترويسة X-Owner-Token. الرمز لا يُضمّن في الملفات ولا يُرسل إلى سجل النشاط. يخزنه المتصفح في sessionStorage للجلسة الحالية فقط.</p>${state.authorized ? '<button class="button button-quiet" id="logout-button">إنهاء جلسة المالك</button>' : '<button class="button button-primary" data-open-auth>إدخال رمز المالك</button>'}</div></section><section class="panel health-embed"><div class="panel-heading"><div><h2 class="panel-title">حالة النظام الفعلية</h2><div class="panel-caption">الاتصال بالخادم وSQLite مفحوص عند الطلب.</div></div><button class="button button-quiet" id="refresh-health">إعادة الفحص</button></div>${healthCards(state.health)}</section>`;
 }
 function settingsPage() {
-  return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">إعدادات التشغيل</h2><div class="panel-caption">إعدادات تُقرأ من بيئة الخادم ولا تُعرض أسرارها.</div></div></div><div class="setting-row"><div class="setting-copy"><strong>Backend API</strong><small>نفس المصدر · /api</small></div>${statusBadge(state.health?.checks?.backend || 'ERROR')}</div><div class="setting-row"><div class="setting-copy"><strong>قاعدة البيانات</strong><small>SQLite · الملف مستثنى من Git</small></div>${statusBadge(state.health?.checks?.database || 'ERROR')}</div><div class="setting-row"><div class="setting-copy"><strong>المصادقة</strong><small>OWNER_API_TOKEN من بيئة الخادم</small></div>${statusBadge(state.health?.checks?.authentication || 'NOT_CONFIGURED')}</div>${Object.entries(state.health?.checks || {}).filter(([key]) => !['backend','database','authentication'].includes(key)).map(([key,value]) => `<div class="setting-row"><div class="setting-copy"><strong>${esc(key)}</strong><small>تُضبط بمتغيرات بيئة الخادم فقط</small></div>${typeof value === 'string' ? statusBadge(value) : statusBadge('NOT_CONFIGURED')}</div>`).join('')}<p class="panel-caption">لا توجد أسرار مهيأة أو خدمات خارجية في المستودع حالياً. انظر README.md لإعدادات البيئة.</p></section>`;
+  return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">إعدادات التشغيل</h2><div class="panel-caption">إعدادات تُقرأ من بيئة الخادم ولا تُعرض أسرارها.</div></div></div><div class="setting-row"><div class="setting-copy"><strong>Backend API</strong><small>نفس المصدر · /api</small></div>${statusBadge(state.health?.checks?.backend || 'ERROR')}</div><div class="setting-row"><div class="setting-copy"><strong>قاعدة البيانات</strong><small>SQLite · الملف مستثنى من Git</small></div>${statusBadge(state.health?.checks?.database || 'ERROR')}</div><div class="setting-row"><div class="setting-copy"><strong>المصادقة</strong><small>OWNER_API_TOKEN من بيئة الخادم</small></div>${statusBadge(state.health?.checks?.authentication || 'NOT_CONFIGURED')}</div><div class="setting-row"><div class="setting-copy"><strong>حسابات الفيديو والصوت</strong><small>إدارة حتى 20 مفتاحاً مشفراً وتدوير محلي</small></div><button class="button button-quiet" type="button" data-page="external-integrations">إدارة الحسابات</button></div>${Object.entries(state.health?.checks || {}).filter(([key]) => !['backend','database','authentication'].includes(key)).map(([key,value]) => `<div class="setting-row"><div class="setting-copy"><strong>${esc(key)}</strong><small>تُضبط بمتغيرات بيئة الخادم فقط</small></div>${typeof value === 'string' ? statusBadge(value) : statusBadge('NOT_CONFIGURED')}</div>`).join('')}<p class="panel-caption">مفاتيح الحسابات الخارجية تُحفظ مشفرة على الخادم ولا تُعرض في هذه الصفحة. انظر README.md لتفاصيل الإعداد والتخزين.</p></section>`;
 }
 async function modulePage(module) {
   if (isCompanyBuilderRoute(module.id)) return renderCompanyPage(module.id, state);
   if (['ai-team', 'characters', 'projects'].includes(module.id)) return entityPage(module.id);
   if (['ai-router', 'manus', 'github'].includes(module.id)) return integrationPage(module);
+  if (module.id === 'external-integrations') return externalIntegrationsPage();
   if (module.id === 'security') return securityPage();
   if (module.id === 'settings') return settingsPage();
   const stateCode = module.state || 'NOT_CONFIGURED';
@@ -341,13 +370,123 @@ $('#sidebar-navigation').addEventListener('click', (event) => {
   renderPage(button.dataset.page);
 });
 $('#page-content').addEventListener('click', async (event) => {
+  const generationAction = event.target.closest('[data-generation-action]');
+  if (generationAction) {
+    const id = generationAction.dataset.generationId;
+    const action = generationAction.dataset.generationAction;
+    generationAction.disabled = true;
+    try {
+      if (action === 'poll') {
+        const result = await api.pollMediaGeneration(id);
+        toast(result.status === 'COMPLETED' ? 'اكتملت المهمة وحُفظ ملف الإنتاج.' : result.status === 'FAILED' ? (result.error_message || 'فشلت المهمة.') : 'ما زالت مهمة Kling قيد التنفيذ.');
+        await renderPage(state.page);
+      } else if (action === 'audio' || action === 'media') {
+        const blob = await api.mediaBlob(id, action);
+        const playerHost = generationAction.closest('.generation-row')?.querySelector('.generation-player');
+        if (!playerHost) return;
+        if (playerHost.dataset.objectUrl) URL.revokeObjectURL(playerHost.dataset.objectUrl);
+        const objectUrl = URL.createObjectURL(blob);
+        playerHost.dataset.objectUrl = objectUrl;
+        playerHost.replaceChildren();
+        const player = document.createElement(action === 'media' ? 'video' : 'audio');
+        player.controls = true;
+        player.preload = 'metadata';
+        if (action === 'media') player.playsInline = true;
+        player.src = objectUrl;
+        player.className = 'generation-media-player';
+        playerHost.append(player);
+      }
+    } catch (error) {
+      toast(apiFailure(error), 'error');
+      if (error.details?.paused_accounts?.length) await renderPage(state.page);
+    } finally { generationAction.disabled = false; }
+    return;
+  }
+  const integrationAction = event.target.closest('[data-integration-action]');
+  if (integrationAction) {
+    const action = integrationAction.dataset.integrationAction;
+    if (action === 'delete' && !window.confirm('سيُحذف سجل الحساب ومفتاحه المشفر. هل تريد المتابعة؟')) return;
+    integrationAction.disabled = true;
+    try {
+      if (action === 'rotate') {
+        const result = await api.rotateExternalAccount({provider: integrationAction.dataset.provider, service: integrationAction.dataset.service});
+        toast(`اختير الحساب التالي: ${result.account.label} · ${result.account.provider}. لم يُرسل طلب توليد.`);
+      } else if (action === 'test') {
+        const result = await api.testExternalAccount(integrationAction.dataset.accountId);
+        toast(`${label(result.connection.status)} — ${result.connection.message}`);
+      } else if (action === 'toggle') {
+        await api.updateExternalAccount(integrationAction.dataset.accountId, {status: integrationAction.dataset.status});
+        toast(integrationAction.dataset.status === 'ACTIVE' ? 'تم تفعيل الحساب.' : 'تم إيقاف الحساب.');
+      } else if (action === 'delete') {
+        await api.deleteExternalAccount(integrationAction.dataset.accountId);
+        toast('حُذف الحساب ومفتاحه المشفر.');
+      }
+      await renderPage(state.page);
+    } catch (error) { toast(apiFailure(error), 'error'); }
+    finally { integrationAction.disabled = false; }
+    return;
+  }
   const companyAction = await handleCompanyClick(event, state, renderPage, toast);
   if (companyAction) return;
   const button = event.target.closest('[data-page]');
   if (button) renderPage(button.dataset.page);
   if (event.target.closest('[data-open-auth]')) openModal('auth-overlay');
 });
-$('#page-content').addEventListener('submit', (event) => { handleCompanySubmit(event, state, renderPage, toast); });
+$('#page-content').addEventListener('change', (event) => {
+  const provider = event.target.closest('[data-provider-choice]');
+  if (!provider) return;
+  const form = provider.closest('form');
+  const service = provider.value === 'Kling' ? 'VIDEO' : 'AUDIO';
+  form.querySelector('[name="service"]').value = service;
+  form.querySelector('[data-provider-service-label]').textContent = service === 'VIDEO' ? 'فيديو' : 'صوت';
+});
+$('#page-content').addEventListener('submit', async (event) => {
+  const generationForm = event.target.closest('[data-generation-form]');
+  if (generationForm) {
+    event.preventDefault();
+    const values = formObject(generationForm);
+    const confirmation = `سيُرسل النص التالي إلى ElevenLabs لتوليد الصوت، ثم يُرسل وصف المشهد إلى Kling لتوليد الفيديو. قد يستهلك ذلك رصيداً من الحسابين.\n\nالنص الصوتي:\n${values.script_text}\n\nوصف الفيديو:\n${values.visual_prompt}\n\nالمدة: ${values.duration} ثوانٍ · الدقة: ${values.resolution} · النسبة: ${values.aspect_ratio}\n\nهل تريد بدء التوليد الآن؟`;
+    if (!window.confirm(confirmation)) return;
+    const button = generationForm.querySelector('button[type="submit"]');
+    if (button) button.disabled = true;
+    try {
+      const result = await api.executeMediaPipeline(values);
+      const paused = result.generation?.paused_accounts || [];
+      const pausedLabels = paused.map((item) => `${item.label} (${label(item.reason)})`).join('، ');
+      toast(paused.length ? `بدأ الإنتاج بعد إيقاف مؤقت: ${pausedLabels}.` : 'بدأ توليد الصوت والفيديو؛ يمكنك فحص حالة Kling من سجل الإنتاج.');
+      generationForm.reset();
+      await renderPage(state.page);
+    } catch (error) {
+      const paused = error.details?.paused_accounts || [];
+      if (paused.length) toast(`${apiFailure(error)} الحسابات الموقوفة: ${paused.map((item) => `${item.label} (${label(item.reason)})`).join('، ')}`, 'error');
+      else toast(apiFailure(error), 'error');
+      if (error.details?.paused_accounts?.length || error.details?.generation_id) await renderPage(state.page);
+    } finally { if (button) button.disabled = false; }
+    return;
+  }
+  const form = event.target.closest('[data-integration-form]');
+  if (!form) { handleCompanySubmit(event, state, renderPage, toast); return; }
+  event.preventDefault();
+  const button = form.querySelector('button[type="submit"]');
+  const secretField = form.querySelector('[name="credential"]');
+  if (button) button.disabled = true;
+  try {
+    const values = formObject(form);
+    if (form.dataset.integrationForm === 'create') {
+      await api.createExternalAccount(values);
+      toast('أُضيف الحساب وخُزّن مفتاحه مشفراً.');
+    } else {
+      await api.updateExternalAccount(form.dataset.accountId, {credential: values.credential});
+      toast('استُبدل مفتاح الحساب؛ لن يُعرض المفتاح السابق أو الجديد.');
+    }
+    form.reset();
+    await renderPage(state.page);
+  } catch (error) { toast(apiFailure(error), 'error'); }
+  finally {
+    if (secretField) secretField.value = '';
+    if (button) button.disabled = false;
+  }
+});
 $('#auth-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   showFormError('auth-error');

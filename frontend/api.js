@@ -2,11 +2,12 @@ const API_ROOT = '/api';
 let ownerToken = sessionStorage.getItem('ai-media-owner-token') || '';
 
 export class ApiError extends Error {
-  constructor(message, status, code) {
+  constructor(message, status, code, details = {}) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -27,9 +28,26 @@ async function request(path, {method = 'GET', body, publicEndpoint = false, quer
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const problem = payload.error || {};
-    throw new ApiError(problem.message || `فشل الطلب (${response.status}).`, response.status, problem.code || 'request_failed');
+    throw new ApiError(problem.message || `فشل الطلب (${response.status}).`, response.status, problem.code || 'request_failed', problem.details || {});
   }
   return payload;
+}
+
+async function mediaBlob(generationId, kind) {
+  if (!ownerToken) throw new ApiError('يلزم تسجيل دخول المالك لفتح ملف الوسائط.', 401, 'authentication_required');
+  const url = new URL(`${API_ROOT}/external-integrations/generations/${encodeURIComponent(generationId)}/${kind}`, window.location.origin);
+  let response;
+  try {
+    response = await fetch(url, {headers: {Accept: '*/*', 'X-Owner-Token': ownerToken}, cache: 'no-store'});
+  } catch (error) {
+    throw new ApiError('تعذّر الاتصال بالخادم الخلفي.', 0, 'network_error');
+  }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const problem = payload.error || {};
+    throw new ApiError(problem.message || `تعذّر جلب الملف (${response.status}).`, response.status, problem.code || 'media_download_failed', problem.details || {});
+  }
+  return response.blob();
 }
 
 export const api = {
@@ -72,4 +90,15 @@ export const api = {
   createKnowledgeSource: (body) => request('/knowledge-sources', {method: 'POST', body}),
   workflows: () => request('/workflows'),
   createWorkflow: (body) => request('/workflows', {method: 'POST', body}),
+  externalIntegrations: () => request('/external-integrations'),
+  createExternalAccount: (body) => request('/external-integrations/accounts', {method: 'POST', body}),
+  updateExternalAccount: (id, body) => request(`/external-integrations/accounts/${encodeURIComponent(id)}`, {method: 'PATCH', body}),
+  deleteExternalAccount: (id) => request(`/external-integrations/accounts/${encodeURIComponent(id)}`, {method: 'DELETE'}),
+  rotateExternalAccount: (body) => request('/external-integrations/rotate', {method: 'POST', body}),
+  testExternalAccount: (id) => request(`/external-integrations/accounts/${encodeURIComponent(id)}/test`, {method: 'POST'}),
+  executeMediaPipeline: (body) => request('/external-integrations/pipeline', {method: 'POST', body}),
+  generateAudio: (body) => request('/external-integrations/generate/audio', {method: 'POST', body}),
+  generateVideo: (body) => request('/external-integrations/generate/video', {method: 'POST', body}),
+  pollMediaGeneration: (id) => request(`/external-integrations/generations/${encodeURIComponent(id)}`),
+  mediaBlob,
 };
