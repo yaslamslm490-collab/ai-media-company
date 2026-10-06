@@ -150,11 +150,17 @@ class Store:
             "owner": payload.get("owner", actor), "assigned_employee": payload.get("assigned_employee", ""),
             "department": payload.get("department", ""), "priority": payload.get("priority", "NORMAL"),
             "status": payload.get("status", "TODO"), "created_at": now, "updated_at": now,
+            "assigned_employee_id": payload.get("assigned_employee_id") or None,
+            "project_id": payload.get("project_id") or None,
+            "deadline": payload.get("deadline") or None,
+            "approval_required": 1 if payload.get("approval_required") else 0,
         }
         with self.connect() as db:
             db.execute("""INSERT INTO tasks
-                (id,title,description,owner,assigned_employee,department,priority,status,created_at,updated_at)
-                VALUES (:id,:title,:description,:owner,:assigned_employee,:department,:priority,:status,:created_at,:updated_at)""", item)
+                (id,title,description,owner,assigned_employee,department,priority,status,created_at,updated_at,
+                 assigned_employee_id,project_id,deadline,approval_required)
+                VALUES (:id,:title,:description,:owner,:assigned_employee,:department,:priority,:status,:created_at,:updated_at,
+                        :assigned_employee_id,:project_id,:deadline,:approval_required)""", item)
             self.log_activity(db, actor=actor, action="task.created", module="tasks", object_type="task",
                               object_id=item["id"], result=json.dumps({"title": item["title"]}, ensure_ascii=False))
         return item

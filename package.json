@@ -1,0 +1,11 @@
+{
+  "name": "ai-media-company",
+  "version": "2.0.0",
+  "private": true,
+  "description": "AI Media OS company builder and owner-operated control panel",
+  "scripts": {
+    "build": "python3 scripts/build.py",
+    "test": "python3 -m unittest discover -s tests -v",
+    "start": "python3 -m backend.server"
+  }
+}

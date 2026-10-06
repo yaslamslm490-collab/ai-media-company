@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
-from backend.server import make_handler, system_health  # noqa: E402
+from backend.server import load_local_env, make_handler, system_health  # noqa: E402
 from backend.store import Store  # noqa: E402
 
 
@@ -68,6 +68,15 @@ class ApiTestCase(unittest.TestCase):
                 return error.code, json.loads(raw)
             except json.JSONDecodeError:
                 return error.code, raw.decode("utf-8", errors="replace")
+
+    def test_local_env_fills_empty_host_values_without_overwriting_nonempty_values(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env_file = Path(temp) / ".env"
+            env_file.write_text("MANUS_API_KEY=dotenv-test-key\nOPENAI_API_KEY=dotenv-should-not-win\n")
+            with patch.dict(os.environ, {"MANUS_API_KEY": "", "OPENAI_API_KEY": "host-test-key"}):
+                load_local_env(Path(temp))
+                self.assertEqual(os.environ["MANUS_API_KEY"], "dotenv-test-key")
+                self.assertEqual(os.environ["OPENAI_API_KEY"], "host-test-key")
 
     def test_health_checks_backend_and_database_and_does_not_claim_missing_integrations(self):
         status, payload = self.request("GET", "/api/health")
