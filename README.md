@@ -26,7 +26,7 @@ python3 scripts/init_vault.py
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-ضع الرمز المولّد في `OWNER_API_TOKEN` داخل `.env`، ثم:
+اضبط `OWNER_MASTER_PASSWORD` في بيئة الخادم (الموصى به؛ ستة أرقام بالضبط) أو استخدم `OWNER_API_TOKEN` للتوافق مع الإصدارات السابقة. لا تضع قيمة السر في Git؛ ثم:
 
 ```bash
 pnpm build       # ينسخ الأصول المتحققة إلى dist/
@@ -36,7 +36,7 @@ pnpm start       # الخادم على HOST=127.0.0.1 وPORT=8080 افتراضي
 
 يمكن أيضاً استخدام `python3 -m backend.server`. إذا وُجد `dist/index.html` يقدّم الخادم الملفات المسموح بها من `dist/`؛ تظل قاعدة البيانات وملف البيئة في جذر المشروع. المتغيرات `HOST` و`PORT` و`AI_MEDIA_DB_PATH` و`AI_MEDIA_STATIC_ROOT` قابلة للضبط. لا تعرّض الخادم للإنترنت دون TLS وحدود وصول وتشغيل دائم مناسبين.
 
-افتح `http://127.0.0.1:8080` وسجّل الدخول كمالك. يُحفظ الرمز في `sessionStorage` للجلسة فقط. عند غياب `OWNER_API_TOKEN` تبقى الصحة العامة متاحة وتُغلق كل مسارات الشركة الخاصة.
+افتح `http://127.0.0.1:8080` وسجّل الدخول كمالك. يُحفظ السر في `sessionStorage` للجلسة فقط. عند غياب `OWNER_MASTER_PASSWORD` و`OWNER_API_TOKEN` تبقى الصحة العامة متاحة وتُغلق كل مسارات الشركة الخاصة.
 
 ### بيانات البداية الاختيارية
 

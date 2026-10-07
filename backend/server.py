@@ -276,9 +276,12 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
     built_static = project_root / "dist"
     static_root = Path(configured_static).resolve() if configured_static else (built_static if (built_static / "index.html").is_file() else project_root)
     resolved_db = Path(db_path or os.environ.get("AI_MEDIA_DB_PATH", project_root / "data" / "dashboard.sqlite3"))
-    token = owner_token if owner_token is not None else os.environ.get("OWNER_API_TOKEN", "")
-    if token and len(token) < 24:
-        raise ValueError("OWNER_API_TOKEN must be at least 24 characters.")
+    master_password = os.environ.get("OWNER_MASTER_PASSWORD", "")
+    token = owner_token if owner_token is not None else (master_password or os.environ.get("OWNER_API_TOKEN", ""))
+    if owner_token is None and master_password and not re.fullmatch(r"[0-9]{6}", master_password):
+        raise ValueError("OWNER_MASTER_PASSWORD must contain exactly six digits.")
+    if token and len(token) < 6:
+        raise ValueError("OWNER_MASTER_PASSWORD or OWNER_API_TOKEN must be at least 6 characters.")
     store = Store(resolved_db)
     store.initialize()
     company_store = CompanyBuilderStore(store)
@@ -323,7 +326,7 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
 
         def _authenticate(self) -> str:
             if not token:
-                raise ApiProblem(503, "auth_not_configured", "المصادقة غير مهيأة. اضبط OWNER_API_TOKEN على الخادم أولاً.")
+                raise ApiProblem(503, "auth_not_configured", "المصادقة غير مهيأة. اضبط OWNER_MASTER_PASSWORD أو OWNER_API_TOKEN على الخادم أولاً.")
             supplied = self.headers.get("X-Owner-Token", "")
             if not supplied:
                 raise ApiProblem(401, "authentication_required", "يلزم رمز دخول المالك للوصول إلى بيانات مساحة العمل.")
@@ -902,7 +905,8 @@ def main() -> None:
     handler = make_handler()
     server = ThreadingHTTPServer((bind, port), handler)
     print(f"AI Media OS listening at http://{bind}:{port}")
-    print(f"Owner authentication: {'configured' if os.environ.get('OWNER_API_TOKEN') else 'NOT CONFIGURED (read-only health endpoint only)'}")
+    owner_password = os.environ.get("OWNER_MASTER_PASSWORD", "") or os.environ.get("OWNER_API_TOKEN", "")
+    print(f"Owner authentication: {'configured' if owner_password else 'NOT CONFIGURED (read-only health endpoint only)'}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

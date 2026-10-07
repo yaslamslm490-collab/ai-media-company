@@ -269,6 +269,30 @@ class ApiTestCase(unittest.TestCase):
 
 
 class AuthNotConfiguredTest(unittest.TestCase):
+    def test_owner_master_password_accepts_six_digits_from_environment(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"OWNER_MASTER_PASSWORD": "123456", "OWNER_API_TOKEN": ""}):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3"))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(f"http://127.0.0.1:{server.server_port}/api/dashboard", headers={"X-Owner-Token": "123456"})
+                with urlopen(request, timeout=3) as response:
+                    self.assertEqual(response.status, 200)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_owner_secret_rejects_fewer_than_six_characters(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError, "at least 6 characters"):
+                make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3", owner_token="12345")
+
+    def test_owner_master_password_requires_exactly_six_digits(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"OWNER_MASTER_PASSWORD": "abc123", "OWNER_API_TOKEN": ""}):
+            with self.assertRaisesRegex(ValueError, "exactly six digits"):
+                make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3")
+
     def test_private_api_fails_closed_when_no_owner_token_exists(self):
         with tempfile.TemporaryDirectory() as temp:
             server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3", owner_token=""))

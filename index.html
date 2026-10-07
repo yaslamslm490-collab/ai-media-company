@@ -68,8 +68,8 @@
   <div class="overlay" id="auth-overlay" hidden>
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
       <div class="modal-head"><div><span class="modal-kicker">حماية مساحة العمل</span><h2 id="auth-title">دخول المالك</h2></div><button class="icon-button" data-close="auth-overlay" aria-label="إغلاق">×</button></div>
-      <p class="modal-help">أدخل رمز المالك المضبوط على الخادم للتحقق من هويتك. لا يُحفظ الرمز في ملفات الموقع، بل في جلسة المتصفح الحالية فقط.</p>
-      <form id="auth-form"><label class="field-label" for="owner-token-input">رمز المالك</label><input class="text-field" id="owner-token-input" type="password" autocomplete="off" minlength="24" placeholder="أدخله بعد ضبطه على الخادم" /><div id="auth-error" class="form-error" hidden></div><div class="form-actions"><button type="button" class="button button-quiet" id="clear-token-button">مسح الجلسة</button><button class="button button-primary" type="submit">التحقق والدخول</button></div></form>
+      <p class="modal-help">أدخل كلمة مرور المالك المضبوطة على الخادم للتحقق من هويتك. لا تُحفظ في ملفات الموقع، بل في جلسة المتصفح الحالية فقط.</p>
+      <form id="auth-form"><label class="field-label" for="owner-token-input">كلمة مرور المالك</label><input class="text-field" id="owner-token-input" type="password" autocomplete="current-password" required maxlength="256" placeholder="أدخل كلمة مرور المالك" /><div id="auth-error" class="form-error" hidden></div><div class="form-actions"><button type="button" class="button button-quiet" id="clear-token-button">مسح الجلسة</button><button class="button button-primary" type="submit">التحقق والدخول</button></div></form>
     </section>
   </div>
 
