@@ -565,6 +565,13 @@ function formObject(form) { return Object.fromEntries(new FormData(form).entries
 
 $('#auth-button').addEventListener('click', () => state.authorized ? logout() : openModal('auth-overlay'));
 $('#owner-profile').addEventListener('click', () => openModal('auth-overlay'));
+$('#back-btn')?.addEventListener('click', () => {
+  if (location.hash && location.hash !== '#dashboard' && window.history.length > 1) {
+    window.history.back();
+  } else {
+    location.hash = '#dashboard';
+  }
+});
 $('#sidebar-navigation').addEventListener('click', (event) => {
   const button = event.target.closest('[data-page]');
   if (!button) return;
