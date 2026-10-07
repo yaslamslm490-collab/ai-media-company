@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+data/*.sqlite3
+data/*.sqlite3-shm
+data/*.sqlite3-wal
+data/generated_media/
+dist/
+
+# Local protected runtime state
+.ai-media-owner-password
+backups/
