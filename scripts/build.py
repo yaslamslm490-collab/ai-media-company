@@ -12,6 +12,7 @@ DIST = ROOT / "dist"
 ASSETS = (
     "index.html",
     "styles.css",
+    "assets/style.css",
     "manus-routes.json",
     "app.js",
     "frontend/app.js",
@@ -24,12 +25,14 @@ ASSETS = (
 
 
 def main() -> None:
+    (ROOT / "assets").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / "styles.css", ROOT / "assets" / "style.css")
     for rel in ASSETS:
         source = ROOT / rel
         if not source.is_file() or source.stat().st_size == 0:
             raise SystemExit(f"missing or empty build asset: {rel}")
     index = (ROOT / "index.html").read_text(encoding="utf-8")
-    for expected in ("./styles.css", "./frontend/app.js"):
+    for expected in ("/assets/style.css", "./frontend/app.js"):
         if expected not in index:
             raise SystemExit(f"index.html does not reference required asset: {expected}")
     routes = json.loads((ROOT / "manus-routes.json").read_text(encoding="utf-8"))

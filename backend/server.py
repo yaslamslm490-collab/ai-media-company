@@ -510,6 +510,7 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             allowed = (
                 target == (static_root / "index.html").resolve()
                 or (target.parent == static_root and target.name in {"styles.css", "manus-routes.json", "app.js"})
+                or (target.parent == (static_root / "assets").resolve() and target.name == "style.css")
                 or (target.parent == (static_root / "frontend").resolve() and target.suffix == ".js")
             )
             if not allowed or not target.is_file():
