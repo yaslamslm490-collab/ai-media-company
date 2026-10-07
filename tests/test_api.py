@@ -294,7 +294,7 @@ class AuthNotConfiguredTest(unittest.TestCase):
                 make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3")
 
     def test_private_api_fails_closed_when_no_owner_token_exists(self):
-        with tempfile.TemporaryDirectory() as temp:
+        with patch.dict(os.environ, {}, clear=True), tempfile.TemporaryDirectory() as temp:
             server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3", owner_token=""))
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()

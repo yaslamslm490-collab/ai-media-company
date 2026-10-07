@@ -90,7 +90,7 @@ export const api = {
   createKnowledgeSource: (body) => request('/knowledge-sources', {method: 'POST', body}),
   workflows: () => request('/workflows'),
   createWorkflow: (body) => request('/workflows', {method: 'POST', body}),
-  externalIntegrations: () => request('/external-integrations'),
+  externalIntegrations: (query = {}) => request('/external-integrations', {query}),
   createExternalAccount: (body) => request('/external-integrations/accounts', {method: 'POST', body}),
   updateExternalAccount: (id, body) => request(`/external-integrations/accounts/${encodeURIComponent(id)}`, {method: 'PATCH', body}),
   deleteExternalAccount: (id) => request(`/external-integrations/accounts/${encodeURIComponent(id)}`, {method: 'DELETE'}),

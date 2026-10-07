@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -13,13 +14,17 @@ from urllib.request import Request, urlopen
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from backend.database import ensure_migration_table, migration_applied, record_migration, table_columns
 from backend.store import Store, new_id, utc_now
 
-MAX_ACCOUNTS = 20
 SERVICES = {"VIDEO", "AUDIO", "BOTH"}
 ACCOUNT_STATUSES = {"ACTIVE", "PAUSED"}
 CANONICAL_PROVIDERS = {"kling": "Kling", "elevenlabs": "ElevenLabs"}
 PROVIDER_SERVICE = {"kling": "VIDEO", "elevenlabs": "AUDIO"}
+PROVIDER_PREFIXES = {"kling": "KL", "elevenlabs": "EL"}
+ACCOUNT_REGIONS = {"UN", "US", "EU", "TR", "RU", "EG"}
+DEFAULT_ACCOUNT_PAGE_SIZE = 5
+MAX_ACCOUNTS = 20
 
 
 class IntegrationProblem(Exception):
@@ -39,6 +44,7 @@ class IntegrationStore:
 
     def initialize(self) -> None:
         with self.store.connect() as db:
+            ensure_migration_table(db)
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS external_accounts (
                     id TEXT PRIMARY KEY,
@@ -57,7 +63,9 @@ class IntegrationStore:
                     connection_message TEXT NOT NULL DEFAULT 'لم يُفحص الاتصال بعد.',
                     last_checked_at TEXT NOT NULL DEFAULT '',
                     pause_reason TEXT NOT NULL DEFAULT '',
-                    pause_until TEXT NOT NULL DEFAULT ''
+                    pause_until TEXT NOT NULL DEFAULT '',
+                    account_code TEXT NOT NULL DEFAULT '',
+                    region_code TEXT NOT NULL DEFAULT 'UN'
                 );
                 CREATE INDEX IF NOT EXISTS external_accounts_provider_service_idx
                     ON external_accounts(provider_key, status);
@@ -96,17 +104,51 @@ class IntegrationStore:
                 CREATE INDEX IF NOT EXISTS media_generation_jobs_recent_idx
                     ON media_generation_jobs(created_at DESC);
             """)
-            columns = {row["name"] for row in db.execute("PRAGMA table_info(external_accounts)").fetchall()}
+            columns = table_columns(db, "external_accounts")
             migrations = {
                 "connection_status": "TEXT NOT NULL DEFAULT 'NOT_CHECKED'",
                 "connection_message": "TEXT NOT NULL DEFAULT 'لم يُفحص الاتصال بعد.'",
                 "last_checked_at": "TEXT NOT NULL DEFAULT ''",
                 "pause_reason": "TEXT NOT NULL DEFAULT ''",
                 "pause_until": "TEXT NOT NULL DEFAULT ''",
+                "account_code": "TEXT NOT NULL DEFAULT ''",
+                "region_code": "TEXT NOT NULL DEFAULT 'UN'",
             }
             for name, definition in migrations.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE external_accounts ADD COLUMN {name} {definition}")
+            record_migration(db, "003-media-integrations-v1", utc_now())
+
+            if not migration_applied(db, "004-account-code-v1"):
+                db.execute("CREATE TABLE IF NOT EXISTS account_code_sequences (prefix TEXT PRIMARY KEY, last_number INTEGER NOT NULL DEFAULT 0)")
+                sequence_rows = db.execute("SELECT prefix,last_number FROM account_code_sequences").fetchall()
+                last_numbers = {str(row["prefix"]): int(row["last_number"]) for row in sequence_rows}
+                account_rows = db.execute("SELECT id,provider_key,account_code FROM external_accounts ORDER BY created_at,id").fetchall()
+                for row in account_rows:
+                    code = str(row["account_code"] or "")
+                    match = re.fullmatch(r"#([A-Z0-9]{2,8})-(\d+)", code)
+                    if match:
+                        prefix, number = match.group(1), int(match.group(2))
+                        last_numbers[prefix] = max(last_numbers.get(prefix, 0), number)
+                        continue
+                    prefix = self._account_prefix(str(row["provider_key"] or ""))
+                    number = last_numbers.get(prefix, 0) + 1
+                    code = f"#{prefix}-{number:03d}"
+                    db.execute("UPDATE external_accounts SET account_code=? WHERE id=?", (code, row["id"]))
+                    last_numbers[prefix] = number
+                for prefix, number in last_numbers.items():
+                    db.execute("INSERT OR IGNORE INTO account_code_sequences(prefix,last_number) VALUES (?,?)", (prefix, number))
+                    db.execute("UPDATE account_code_sequences SET last_number=? WHERE prefix=? AND last_number<?", (number, prefix, number))
+                db.execute("CREATE UNIQUE INDEX IF NOT EXISTS external_accounts_account_code_uq ON external_accounts(account_code)")
+                record_migration(db, "004-account-code-v1", utc_now())
+
+    @staticmethod
+    def _account_prefix(provider: str, requested: Any = None) -> str:
+        raw = requested.strip() if isinstance(requested, str) and requested.strip() else PROVIDER_PREFIXES.get(provider.casefold(), provider)
+        prefix = re.sub(r"[^A-Z0-9]", "", raw.upper())[:8]
+        if not 2 <= len(prefix) <= 8:
+            raise IntegrationProblem(400, "invalid_account_prefix", "بادئة الحساب يجب أن تتكون من حرفين إلى ثمانية أحرف أو أرقام.")
+        return prefix
 
     @staticmethod
     def _vault() -> Fernet:
@@ -160,6 +202,8 @@ class IntegrationStore:
         services = cls._decode_services(row["services_json"])
         return {
             "id": row["id"],
+            "account_code": row["account_code"],
+            "region_code": row["region_code"],
             "label": row["label"],
             "provider": row["provider"],
             "services": services,
@@ -176,45 +220,85 @@ class IntegrationStore:
             "last_used_at": {"VIDEO": row["last_used_video"] or None, "AUDIO": row["last_used_audio"] or None},
         }
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, *, limit: int = DEFAULT_ACCOUNT_PAGE_SIZE, offset: int = 0, search: str = "", problems: bool = False) -> dict[str, Any]:
+        limit = min(max(int(limit), 1), 100)
+        offset = min(max(int(offset), 0), 1_000_000)
+        search = search.strip()[:120]
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if search:
+            if search.startswith("#"):
+                clauses.append("UPPER(a.account_code)=?")
+                parameters.append(search.upper())
+            else:
+                escaped = search.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+                like = f"%{escaped}%"
+                clauses.append("(a.account_code LIKE ? ESCAPE '!' OR a.label LIKE ? ESCAPE '!' OR a.provider LIKE ? ESCAPE '!' OR a.id=?)")
+                parameters.extend((like, like, like, search))
+        if problems:
+            clauses.append("(a.status='PAUSED' OR a.connection_status NOT IN ('ONLINE','NOT_CHECKED','NOT_CONFIGURED') OR a.pause_reason<>'')")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self.store.connect() as db:
-            rows = db.execute("""
-                SELECT a.*, CASE WHEN s.account_id IS NULL THEN 0 ELSE 1 END AS secret_configured
+            total_accounts = int(db.execute("SELECT COUNT(*) AS total FROM external_accounts").fetchone()["total"])
+            total_active = int(db.execute("SELECT COUNT(*) AS total FROM external_accounts WHERE status='ACTIVE'").fetchone()["total"])
+            active_by_service = {
+                service: int(db.execute("SELECT COUNT(*) AS total FROM external_accounts WHERE status='ACTIVE' AND services_json LIKE ?", (f'%\"{service}\"%',)).fetchone()["total"])
+                for service in ("VIDEO", "AUDIO")
+            }
+            providers = [str(row["provider"]) for row in db.execute("SELECT DISTINCT provider FROM external_accounts ORDER BY provider").fetchall()]
+            provider_rows = db.execute("""SELECT provider, COUNT(*) AS total,
+                SUM(CASE WHEN status='ACTIVE' AND services_json LIKE ? THEN 1 ELSE 0 END) AS active_video,
+                SUM(CASE WHEN status='ACTIVE' AND services_json LIKE ? THEN 1 ELSE 0 END) AS active_audio,
+                SUM(CASE WHEN connection_status='ONLINE' THEN 1 ELSE 0 END) AS online_count
+                FROM external_accounts GROUP BY provider ORDER BY provider""",
+                ('%\"VIDEO\"%', '%\"AUDIO\"%')).fetchall()
+            provider_summary = [{
+                "provider": str(row["provider"]), "total": int(row["total"]),
+                "active_video": int(row["active_video"] or 0), "active_audio": int(row["active_audio"] or 0),
+                "online_count": int(row["online_count"] or 0),
+            } for row in provider_rows]
+            rows = db.execute(f"""
+                SELECT a.*, CASE WHEN s.secret_ciphertext IS NULL OR s.secret_ciphertext='' THEN 0 ELSE 1 END AS secret_configured
                 FROM external_accounts AS a
                 LEFT JOIN external_account_secrets AS s ON s.account_id = a.id
+                {where}
                 ORDER BY a.created_at, a.id
-            """).fetchall()
+                LIMIT ? OFFSET ?
+            """, (*parameters, limit, offset)).fetchall()
+            matched_total = int(db.execute(f"SELECT COUNT(*) AS total FROM external_accounts AS a{where}", parameters).fetchone()["total"])
+            adapters = {}
+            for service, provider in (("VIDEO", "kling"), ("AUDIO", "elevenlabs")):
+                result = db.execute("""SELECT COUNT(*) AS total FROM external_accounts AS a
+                    INNER JOIN external_account_secrets AS s ON s.account_id=a.id
+                    WHERE a.status='ACTIVE' AND a.provider_key=? AND a.services_json LIKE ? AND s.secret_ciphertext<>''""", (provider, f'%\"{service}\"%')).fetchone()
+                adapters[service] = "READY" if int(result["total"]) else "NOT_CONFIGURED"
         accounts = [self._public_account(row) for row in rows]
-        active = [account for account in accounts if account["status"] == "ACTIVE"]
-        by_service = {
-            service: sum(1 for account in active if service in account["services"])
-            for service in ("VIDEO", "AUDIO")
-        }
         return {
             "accounts": accounts,
+            "pagination": {"limit": limit, "offset": offset, "total": matched_total, "has_more": offset + len(accounts) < matched_total},
             "summary": {
-                "total_accounts": len(accounts),
-                "active_accounts": len(active),
+                "total_accounts": total_accounts,
+                "active_accounts": total_active,
                 "max_accounts": MAX_ACCOUNTS,
-                "active_by_service": by_service,
-                "providers": sorted({account["provider"] for account in accounts}, key=str.casefold),
+                "active_by_service": active_by_service,
+                "providers": providers,
             },
-            "generation_adapters": {
-                service: "READY" if any(account["status"] == "ACTIVE" and account["secret_configured"] and service in account["services"]
-                                         and account["provider"].casefold() == provider for account in accounts)
-                else "NOT_CONFIGURED"
-                for service, provider in (("VIDEO", "kling"), ("AUDIO", "elevenlabs"))
-            },
+            "provider_summary": provider_summary,
+            "generation_adapters": adapters,
             "generations": self.list_generations(limit=12),
         }
 
     def create_account(self, payload: dict[str, Any], actor: str) -> dict[str, Any]:
-        allowed = {"label", "provider", "service", "status", "credential"}
+        allowed = {"label", "provider", "service", "status", "credential", "prefix", "region_code"}
         if set(payload) - allowed:
             raise IntegrationProblem(400, "invalid_fields", "تحتوي البيانات على حقول غير مدعومة.")
         label = self._text(payload, "label", required=True, maximum=120)
         provider = self._text(payload, "provider", required=True, maximum=120)
         provider = CANONICAL_PROVIDERS.get(provider.casefold(), provider)
+        prefix = self._account_prefix(provider.casefold(), payload.get("prefix"))
+        region_code = str(payload.get("region_code") or "UN").strip().upper()
+        if region_code not in ACCOUNT_REGIONS:
+            raise IntegrationProblem(400, "invalid_region", "منطقة الحساب يجب أن تكون UN أو US أو EU أو TR أو RU أو EG.")
         services = self._services(payload.get("service"))
         expected_service = PROVIDER_SERVICE.get(provider.casefold())
         if expected_service and services != [expected_service]:
@@ -228,13 +312,17 @@ class IntegrationStore:
         account_id = new_id()
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            count = db.execute("SELECT COUNT(*) FROM external_accounts").fetchone()[0]
+            count = int(db.execute("SELECT COUNT(*) AS total FROM external_accounts").fetchone()["total"])
             if count >= MAX_ACCOUNTS:
                 raise IntegrationProblem(409, "account_pool_full", f"سعة مخزن الحسابات القصوى هي {MAX_ACCOUNTS} حساباً.")
+            db.execute("INSERT OR IGNORE INTO account_code_sequences(prefix,last_number) VALUES (?,0)", (prefix,))
+            db.execute("UPDATE account_code_sequences SET last_number=last_number+1 WHERE prefix=?", (prefix,))
+            sequence = int(db.execute("SELECT last_number FROM account_code_sequences WHERE prefix=?", (prefix,)).fetchone()["last_number"])
+            account_code = f"#{prefix}-{sequence:03d}"
             db.execute("""INSERT INTO external_accounts
-                (id,label,provider,provider_key,services_json,status,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?)""",
-                (account_id, label, provider, provider.casefold(), json.dumps(services), status, now, now))
+                (id,label,provider,provider_key,services_json,status,account_code,region_code,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (account_id, label, provider, provider.casefold(), json.dumps(services), status, account_code, region_code, now, now))
             db.execute("INSERT INTO external_account_secrets(account_id,secret_ciphertext,updated_at) VALUES (?,?,?)",
                        (account_id, encrypted, now))
             self.store.log_activity(db, actor=actor, action="integration.account_created", module="external-integrations",
@@ -285,7 +373,7 @@ class IntegrationStore:
             self.store.log_activity(db, actor=actor, action="integration.account_updated", module="external-integrations",
                                     object_type="external_account", object_id=account_id,
                                     result=json.dumps({"fields": changed, "credential_rotated": encrypted is not None}, ensure_ascii=False))
-            row = db.execute("""SELECT a.*, CASE WHEN s.account_id IS NULL THEN 0 ELSE 1 END AS secret_configured
+            row = db.execute("""SELECT a.*, CASE WHEN s.secret_ciphertext IS NULL OR s.secret_ciphertext='' THEN 0 ELSE 1 END AS secret_configured
                 FROM external_accounts AS a LEFT JOIN external_account_secrets AS s ON s.account_id=a.id WHERE a.id=?""",
                              (account_id,)).fetchone()
         return self._public_account(row)
@@ -338,7 +426,7 @@ class IntegrationStore:
             self.store.log_activity(db, actor=actor, action="integration.connection_tested", module="external-integrations",
                                     object_type="external_account", object_id=account_id,
                                     result=json.dumps({"provider": row["provider"], "status": status}, ensure_ascii=False))
-            updated = db.execute("""SELECT a.*, CASE WHEN s.account_id IS NULL THEN 0 ELSE 1 END AS secret_configured
+            updated = db.execute("""SELECT a.*, CASE WHEN s.secret_ciphertext IS NULL OR s.secret_ciphertext='' THEN 0 ELSE 1 END AS secret_configured
                 FROM external_accounts AS a LEFT JOIN external_account_secrets AS s ON s.account_id=a.id WHERE a.id=?""",
                                  (account_id,)).fetchone()
         return {"connection": {"status": status, "message": message}, "account": self._public_account(updated)}
@@ -390,7 +478,7 @@ class IntegrationStore:
                                             result=json.dumps({"provider": provider_key}, ensure_ascii=False))
             rows = db.execute("""SELECT a.*, 1 AS secret_configured
                 FROM external_accounts AS a JOIN external_account_secrets AS s ON s.account_id=a.id
-                WHERE a.provider_key=? AND a.status='ACTIVE' ORDER BY a.created_at,a.id""",
+                WHERE a.provider_key=? AND a.status='ACTIVE' AND s.secret_ciphertext<>'' ORDER BY a.created_at,a.id""",
                               (provider_key,)).fetchall()
             eligible = [row for row in rows if service in self._decode_services(row["services_json"])]
             if not eligible:
@@ -479,7 +567,10 @@ class IntegrationStore:
             self.store.log_activity(db, actor=actor, action="media.generation_started", module="external-integrations",
                                     object_type="media_generation", object_id=job["id"],
                                     result=json.dumps({"kind": kind, "provider": provider}, ensure_ascii=False))
-        return self.get_generation(job["id"])
+        created = self.get_generation(job["id"])
+        if created is None:
+            raise RuntimeError("Generation record disappeared after insertion.")
+        return created
 
     def update_generation(self, generation_id: str, *, actor: str = "owner", **fields: Any) -> dict[str, Any] | None:
         allowed = {"status", "account_id", "audio_account_id", "video_account_id", "provider_task_id", "external_task_id",
@@ -517,6 +608,8 @@ class IntegrationStore:
             row = db.execute("SELECT secret_ciphertext FROM external_account_secrets WHERE account_id=?", (account_id,)).fetchone()
         if row is None:
             raise IntegrationProblem(404, "credential_not_found", "بيانات اعتماد الحساب غير موجودة.")
+        if not row["secret_ciphertext"]:
+            raise IntegrationProblem(404, "credential_not_found", "لا يوجد مفتاح API أساسي محفوظ لهذا النوع من الحساب.")
         try:
             return self._vault().decrypt(row["secret_ciphertext"].encode("ascii")).decode("utf-8")
         except InvalidToken as error:

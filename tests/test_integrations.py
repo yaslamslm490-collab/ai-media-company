@@ -157,17 +157,51 @@ class ExternalIntegrationsApiTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(result["account"]["label"], "shared")
 
-    def test_capacity_is_limited_to_twenty_accounts(self):
+    def test_twenty_account_limit_and_five_item_pagination(self):
         for index in range(20):
             status, _ = self.create_account(f"account-{index:02d}")
             self.assertEqual(status, 201)
-        status, result = self.create_account("account-21")
+        status, rejected = self.create_account("account-20")
         self.assertEqual(status, 409)
-        self.assertEqual(result["error"]["code"], "account_pool_full")
-        status, snapshot = self.request("GET", "/api/external-integrations")
+        self.assertEqual(rejected["error"]["code"], "account_pool_full")
+        status, first_page = self.request("GET", "/api/external-integrations")
         self.assertEqual(status, 200)
-        self.assertEqual(snapshot["summary"]["total_accounts"], 20)
-        self.assertEqual(snapshot["summary"]["max_accounts"], 20)
+        self.assertEqual(first_page["summary"]["total_accounts"], 20)
+        self.assertEqual(first_page["summary"]["max_accounts"], 20)
+        self.assertEqual(len(first_page["accounts"]), 5)
+        self.assertTrue(first_page["pagination"]["has_more"])
+        status, last_page = self.request("GET", "/api/external-integrations?limit=5&offset=15")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(last_page["accounts"]), 5)
+        self.assertFalse(last_page["pagination"]["has_more"])
+
+    def test_prefix_code_is_unique_searchable_and_customizable(self):
+        status, first = self.create_account("first")
+        self.assertEqual(status, 201)
+        status, second = self.create_account("second")
+        self.assertEqual(status, 201)
+        self.assertEqual(first["account"]["account_code"], "#RUNWAY-001")
+        self.assertEqual(second["account"]["account_code"], "#RUNWAY-002")
+        status, custom = self.request("POST", "/api/external-integrations/accounts", {
+            "label": "telegram-proxy", "provider": "Runway", "service": "VIDEO",
+            "prefix": "TG", "region_code": "EG", "credential": "TEST_CREDENTIAL_TG_0123456789abcdef",
+        })
+        self.assertEqual(status, 201)
+        self.assertEqual(custom["account"]["account_code"], "#TG-001")
+        self.assertEqual(custom["account"]["region_code"], "EG")
+        status, result = self.request("GET", "/api/external-integrations?q=%23RUNWAY-002")
+        self.assertEqual(status, 200)
+        self.assertEqual(result["pagination"]["total"], 1)
+        self.assertEqual([item["account_code"] for item in result["accounts"]], ["#RUNWAY-002"])
+    def test_problem_filter_only_returns_paused_or_unhealthy_accounts(self):
+        status, normal = self.create_account("normal")
+        self.assertEqual(status, 201)
+        status, paused = self.create_account("paused")
+        self.assertEqual(status, 201)
+        self.assertEqual(self.request("PATCH", f"/api/external-integrations/accounts/{paused['account']['id']}", {"status": "PAUSED"})[0], 200)
+        status, result = self.request("GET", "/api/external-integrations?issues=1")
+        self.assertEqual(status, 200)
+        self.assertEqual([item["account_code"] for item in result["accounts"]], [paused["account"]["account_code"]])
 
     def test_paused_accounts_are_not_selected_and_deletion_removes_secret(self):
         status, created = self.create_account("pause-me")

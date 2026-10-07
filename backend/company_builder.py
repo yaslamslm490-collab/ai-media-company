@@ -12,6 +12,7 @@ from typing import Any
 
 from backend.modules import MODULES
 from backend.store import Store, new_id, utc_now
+from backend.database import ensure_migration_table, migration_applied, record_migration, table_columns
 
 
 EMPLOYEE_TYPES = {"MANAGER", "EMPLOYEE", "WORKER"}
@@ -99,6 +100,9 @@ class CompanyBuilderStore:
 
     def initialize(self) -> None:
         with self.store.connect() as db:
+            ensure_migration_table(db)
+            if migration_applied(db, "002-company-builder-v1"):
+                return
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS roles (
                     id TEXT PRIMARY KEY,
@@ -195,10 +199,20 @@ class CompanyBuilderStore:
                 "deadline": "TEXT",
                 "approval_required": "INTEGER NOT NULL DEFAULT 0",
             })
+            for table, column, prefix in (("departments", "code", "DEPT"), ("ai_employees", "employee_code", "AI")):
+                missing = db.execute(f"SELECT id FROM {table} WHERE {column}='' OR {column} IS NULL").fetchall()
+                for row in missing:
+                    identity = re.sub(r"[^A-Za-z0-9]", "", str(row["id"])).upper()
+                    base = f"{prefix}-{identity[:20]}"
+                    candidate, suffix = base, 1
+                    while db.execute(f"SELECT 1 FROM {table} WHERE {column}=? AND id<>?", (candidate, row["id"])).fetchone():
+                        candidate = f"{base[:27]}-{suffix:02d}"
+                        suffix += 1
+                    db.execute(f"UPDATE {table} SET {column}=? WHERE id=?", (candidate, row["id"]))
             db.executescript("""
-                CREATE UNIQUE INDEX IF NOT EXISTS departments_code_unique_idx ON departments(code) WHERE code <> '';
+                CREATE UNIQUE INDEX IF NOT EXISTS departments_code_unique_idx ON departments(code);
                 CREATE INDEX IF NOT EXISTS departments_status_idx ON departments(status, name);
-                CREATE UNIQUE INDEX IF NOT EXISTS ai_employee_code_unique_idx ON ai_employees(employee_code) WHERE employee_code <> '';
+                CREATE UNIQUE INDEX IF NOT EXISTS ai_employee_code_unique_idx ON ai_employees(employee_code);
                 CREATE INDEX IF NOT EXISTS ai_employee_type_status_idx ON ai_employees(employee_type, lifecycle_status, name);
                 CREATE INDEX IF NOT EXISTS ai_employee_department_idx ON ai_employees(department_id, name);
                 CREATE INDEX IF NOT EXISTS tasks_assigned_employee_idx ON tasks(assigned_employee_id, updated_at DESC);
@@ -261,15 +275,16 @@ class CompanyBuilderStore:
             db.executemany("INSERT INTO product_modules(id,title,employee_assignable) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,employee_assignable=excluded.employee_assignable",
                            [(item["id"],item["title"],1 if item["id"] in EMPLOYEE_MODULE_IDS else 0) for item in MODULES])
             self._backfill_existing_records(db)
+            record_migration(db, "002-company-builder-v1", utc_now())
 
     @staticmethod
-    def _add_columns(db: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
-        existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+    def _add_columns(db: Any, table: str, columns: dict[str, str]) -> None:
+        existing = table_columns(db, table)
         for name, declaration in columns.items():
             if name not in existing:
                 db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
-    def _seed_roles_permissions(self, db: sqlite3.Connection) -> None:
+    def _seed_roles_permissions(self, db: Any) -> None:
         now = utc_now()
         for code, name, sensitive in PERMISSIONS:
             db.execute("INSERT OR IGNORE INTO permissions(code,name,sensitive,created_at) VALUES (?,?,?,?)",
@@ -286,12 +301,15 @@ class CompanyBuilderStore:
                 db.execute("INSERT OR IGNORE INTO role_permissions(role_id,permission_code) VALUES (?,?)",
                            (role_id, permission_code))
 
-    def _backfill_existing_records(self, db: sqlite3.Connection) -> None:
+    def _backfill_existing_records(self, db: Any) -> None:
         now = utc_now()
         db.execute("UPDATE departments SET updated_at=created_at WHERE updated_at='' OR updated_at IS NULL")
         db.execute("UPDATE ai_employees SET lifecycle_status=CASE WHEN status='ACTIVE' THEN 'ACTIVE' ELSE 'INACTIVE' END WHERE updated_at='' OR updated_at IS NULL")
         db.execute("UPDATE ai_employees SET updated_at=created_at WHERE updated_at='' OR updated_at IS NULL")
-        db.execute("UPDATE ai_employees SET employee_code='AI-' || upper(substr(id,1,8)) WHERE employee_code='' OR employee_code IS NULL")
+        if getattr(db, "is_mysql", False):
+            db.execute("UPDATE ai_employees SET employee_code=CONCAT('AI-', UPPER(SUBSTRING(id,1,8))) WHERE employee_code='' OR employee_code IS NULL")
+        else:
+            db.execute("UPDATE ai_employees SET employee_code='AI-' || upper(substr(id,1,8)) WHERE employee_code='' OR employee_code IS NULL")
         role_rows = {row["code"]: row["id"] for row in db.execute("SELECT id,code FROM roles")}
         employee_rows = db.execute("SELECT id,employee_type,role_id FROM ai_employees").fetchall()
         for row in employee_rows:

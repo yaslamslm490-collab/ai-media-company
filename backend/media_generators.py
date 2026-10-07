@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -15,6 +17,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from backend.integrations import IntegrationProblem, IntegrationStore
+from .storage import PlatformObjectStorage, StorageError
 
 KLING_BASE = "https://api-singapore.klingai.com"
 ELEVEN_BASE = "https://api.elevenlabs.io/v1"
@@ -40,8 +43,15 @@ class MediaGenerator:
 
     def __init__(self, integrations: IntegrationStore):
         self.integrations = integrations
-        self.media_dir = Path(integrations.store.path).resolve().parent / "generated_media"
+        self.use_object_storage = integrations.store.is_mysql
+        if integrations.store.path is not None:
+            self.media_dir = integrations.store.path.resolve().parent / "generated_media"
+        else:
+            self.media_dir = Path(tempfile.gettempdir()) / "ai-media-os-generated"
+        self.download_dir = self.media_dir / ".downloads"
+        self.storage = PlatformObjectStorage()
         self.media_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.download_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             os.chmod(self.media_dir, 0o700)
         except OSError:
@@ -174,8 +184,8 @@ class MediaGenerator:
                 return call(account, credential), account, paused
             except ProviderFailure as failure:
                 if not failure.pause_reason:
-                    failure.details = {"paused_accounts": paused}
-                    raise IntegrationProblem(failure.status, failure.code, failure.message, failure.details) from failure
+                    raise IntegrationProblem(failure.status, failure.code, failure.message,
+                                             {"paused_accounts": paused}) from failure
                 last_failure = failure
                 paused_account = self.integrations.pause_for_failover(
                     account_id, reason=failure.pause_reason, pause_seconds=failure.pause_seconds, actor=actor
@@ -199,6 +209,14 @@ class MediaGenerator:
     def _save_bytes(self, filename: str, content: bytes) -> str:
         if not re.fullmatch(r"[a-f0-9]{32}\.(mp3|mp4|wav|m4a)", filename):
             raise IntegrationProblem(500, "invalid_media_filename", "اسم ملف الوسائط الداخلي غير صالح.")
+        if self.use_object_storage:
+            extension = Path(filename).suffix.lower()
+            content_type = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".mp4": "video/mp4"}[extension]
+            try:
+                self.storage.put_bytes(f"generated-media/{filename}", content, content_type)
+            except StorageError as error:
+                raise IntegrationProblem(503, "object_storage_upload_failed", "تعذّر حفظ ملف الوسائط في التخزين الدائم.") from error
+            return f"generated-media/{filename}"
         self.media_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         target = self.media_dir / filename
         temp = target.with_suffix(target.suffix + ".tmp")
@@ -215,6 +233,20 @@ class MediaGenerator:
             except OSError:
                 pass
         return filename
+
+    def _upload_file(self, filename: str, source: Path, content_type: str) -> str:
+        key = f"generated-media/{filename}"
+        maximum = MAX_AUDIO_BYTES if content_type.startswith("audio/") else MAX_VIDEO_BYTES
+        try:
+            self.storage.put_file(key, source, content_type, max_bytes=maximum)
+        except StorageError as error:
+            raise IntegrationProblem(503, "object_storage_upload_failed", "تعذّر حفظ ملف الوسائط في التخزين الدائم.") from error
+        return key
+
+    def _new_workdir(self, generation_id: str) -> Path:
+        workdir = self.media_dir / f".work-{generation_id}-{uuid.uuid4().hex}"
+        workdir.mkdir(parents=True, exist_ok=False, mode=0o700)
+        return workdir
 
     def _new_job(self, *, kind: str, provider: str, prompt: str, params: dict[str, Any], actor: str) -> dict[str, Any]:
         return self.integrations.create_generation(kind=kind, provider=provider, prompt=prompt, params=params, actor=actor)
@@ -388,15 +420,25 @@ class MediaGenerator:
             raise IntegrationProblem(503, "media_probe_failed", "تعذّر فحص مدة ملفات الوسائط بواسطة ffprobe.") from error
 
     def _assemble_pipeline(self, generation_id: str, audio_filename: str, video_url: str) -> str:
-        if not audio_filename or Path(audio_filename).name != audio_filename or not re.fullmatch(r"[a-f0-9]{32}\.(mp3|wav|m4a)", audio_filename):
+        if self.use_object_storage:
+            valid_audio = re.fullmatch(rf"generated-media/{re.escape(generation_id)}\.(mp3|wav|m4a)", audio_filename or "")
+        else:
+            valid_audio = re.fullmatch(rf"{re.escape(generation_id)}\.(mp3|wav|m4a)", audio_filename or "")
+        if not valid_audio:
             raise IntegrationProblem(500, "pipeline_audio_missing", "ملف الصوت الخاص بمهمة الإنتاج غير موجود.")
-        audio_path = self.media_dir / audio_filename
-        if not audio_path.is_file():
-            raise IntegrationProblem(500, "pipeline_audio_missing", "تعذّر العثور على ملف الصوت الناتج.")
-        temp_video = self.media_dir / f"{generation_id}.source.mp4"
-        temp_output = self.media_dir / f"{generation_id}.final.tmp.mp4"
-        final_output = self.media_dir / f"{generation_id}.mp4"
+        workdir = self._new_workdir(generation_id)
+        extension = Path(audio_filename).suffix.lower()
+        audio_path = workdir / f"audio{extension}" if self.use_object_storage else self.media_dir / audio_filename
+        temp_video = workdir / "source.mp4"
+        temp_output = workdir / "final.tmp.mp4"
         try:
+            if self.use_object_storage:
+                try:
+                    self.storage.download_file(audio_filename, audio_path, max_bytes=MAX_AUDIO_BYTES)
+                except StorageError as error:
+                    raise IntegrationProblem(503, "object_storage_download_failed", "تعذّر استرجاع الصوت من التخزين الدائم.") from error
+            elif not audio_path.is_file():
+                raise IntegrationProblem(500, "pipeline_audio_missing", "تعذّر العثور على ملف الصوت الناتج.")
             self._download_video(video_url, temp_video)
             video_duration = self._duration(temp_video)
             audio_duration = self._duration(audio_path)
@@ -412,16 +454,26 @@ class MediaGenerator:
             if result.returncode != 0 or not temp_output.is_file() or temp_output.stat().st_size < 1024:
                 raise IntegrationProblem(502, "media_assembly_failed", "تعذّر دمج الصوت والفيديو محلياً؛ احتُفظ بمخرجي الصوت والفيديو المنفصلين.")
             os.chmod(temp_output, 0o600)
+            if self.use_object_storage:
+                return self._upload_file(f"{generation_id}.mp4", temp_output, "video/mp4")
+            final_output = self.media_dir / f"{generation_id}.mp4"
             temp_output.replace(final_output)
             return final_output.name
         except subprocess.TimeoutExpired as error:
             raise IntegrationProblem(504, "media_assembly_timeout", "استغرق دمج الصوت والفيديو وقتاً أطول من الحد؛ احتُفظ بالمخرجات المنفصلة.") from error
         finally:
-            for path in (temp_video, temp_output):
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    def _persist_provider_video(self, generation_id: str, video_url: str) -> str:
+        if not self.use_object_storage:
+            return ""
+        workdir = self._new_workdir(generation_id)
+        source = workdir / "video.mp4"
+        try:
+            self._download_video(video_url, source)
+            return self._upload_file(f"{generation_id}.mp4", source, "video/mp4")
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
 
     def poll_generation(self, generation_id: str, actor: str) -> dict[str, Any]:
         job = self.integrations.get_generation(generation_id)
@@ -460,7 +512,8 @@ class MediaGenerator:
             return self.integrations.update_generation(generation_id, actor=actor, status="FAILED", error_message=message) or job
         if status not in {"succeeded", "succeed", "completed"}:
             raise IntegrationProblem(502, "kling_unknown_task_status", "أعاد Kling حالة مهمة غير معروفة.")
-        outputs = task.get("outputs") if isinstance(task.get("outputs"), list) else []
+        raw_outputs = task.get("outputs")
+        outputs: list[Any] = raw_outputs if isinstance(raw_outputs, list) else []
         video = next((item for item in outputs if isinstance(item, dict) and item.get("type") == "video" and item.get("url")), None)
         if not video:
             raise IntegrationProblem(502, "kling_video_output_missing", "اكتملت مهمة Kling دون رابط فيديو صالح.")
@@ -468,7 +521,7 @@ class MediaGenerator:
         if job["kind"] == "PIPELINE":
             with self.integrations.store.connect() as db:
                 stored = db.execute("SELECT audio_file FROM media_generation_jobs WHERE id=?", (generation_id,)).fetchone()
-            audio_filename = stored["audio_file"] if stored else ""
+            audio_filename = str(stored["audio_file"]) if stored and stored["audio_file"] else ""
             try:
                 output_file = self._assemble_pipeline(generation_id, audio_filename, video_url)
             except IntegrationProblem as problem:
@@ -477,8 +530,13 @@ class MediaGenerator:
                                                           error_message=problem.message) or job
             return self.integrations.update_generation(generation_id, actor=actor, status="COMPLETED", video_url=video_url,
                                                        output_file=output_file, error_message="") or job
+        try:
+            output_file = self._persist_provider_video(generation_id, video_url)
+        except IntegrationProblem as problem:
+            return self.integrations.update_generation(generation_id, actor=actor, status="FAILED", video_url=video_url,
+                                                       error_message=problem.message) or job
         return self.integrations.update_generation(generation_id, actor=actor, status="COMPLETED", video_url=video_url,
-                                                   error_message="") or job
+                                                   output_file=output_file, error_message="") or job
 
     def media_path(self, generation_id: str, media_kind: str) -> tuple[Path, str] | None:
         job = self.integrations.get_generation(generation_id)
@@ -489,10 +547,24 @@ class MediaGenerator:
         if row is None:
             return None
         filename = row["audio_file"] if media_kind == "audio" else row["output_file"] if media_kind == "media" else ""
-        if not filename or Path(filename).name != filename or not re.fullmatch(r"[a-f0-9]{32}\.(mp3|mp4|wav|m4a)", filename):
+        expected = rf"generated-media/{re.escape(generation_id)}\.(mp3|mp4|wav|m4a)" if self.use_object_storage else rf"{re.escape(generation_id)}\.(mp3|mp4|wav|m4a)"
+        if not filename or not re.fullmatch(expected, filename):
             return None
+        extension = Path(filename).suffix.lower()
+        mime = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".mp4": "video/mp4"}[extension]
+        if self.use_object_storage:
+            path = self.download_dir / f"download-{uuid.uuid4().hex}{extension}"
+            maximum = MAX_AUDIO_BYTES if media_kind == "audio" else MAX_VIDEO_BYTES
+            try:
+                self.storage.download_file(filename, path, max_bytes=maximum)
+            except StorageError as error:
+                raise IntegrationProblem(503, "object_storage_download_failed", "تعذّر استرجاع ملف الوسائط من التخزين الدائم.") from error
+            return path, mime
         path = self.media_dir / filename
         if not path.is_file():
             return None
-        mime = "audio/mpeg" if filename.endswith(".mp3") else "audio/wav" if filename.endswith(".wav") else "video/mp4"
         return path, mime
+
+    def release_media(self, path: Path) -> None:
+        if self.use_object_storage and path.parent.resolve() == self.download_dir.resolve() and path.name.startswith("download-"):
+            path.unlink(missing_ok=True)

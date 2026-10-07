@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.modules import BUILDER_CAPABILITIES, MODULES
+from backend.database import IntegrityError as MySQLIntegrityError, is_mysql_url
 from backend.company_builder import (
     EMPLOYEE_STATUSES,
     EMPLOYEE_TYPES,
@@ -132,13 +133,16 @@ def system_health(store: Store, owner_token: str, environ: dict[str, str] | None
     checks = {
         "backend": "ONLINE",
         "database": database_status,
+        "database_engine": store.engine_name,
         "authentication": "ONLINE" if owner_token else "NOT_CONFIGURED",
+        "media_vault": "ONLINE" if env.get("AI_MEDIA_VAULT_KEY", "").strip() else "NOT_CONFIGURED",
+        "object_storage": "ONLINE" if env.get("MANUS_API_URL", "").strip() and env.get("MANUS_API_KEY", "").strip() else "NOT_CONFIGURED",
         "ai_router": _probe(ai_url, ai_token),
         "manus": _probe(manus_url, manus_token, auth_header="x-manus-api-key", auth_scheme=""),
         "github": _probe(github_url, github_token) if github_token else (_probe_github_cli() if use_github_cli else "NOT_CONFIGURED"),
         "external_integrations": ({name: _probe(url) for name, url in external.items()} if external else "NOT_CONFIGURED"),
     }
-    statuses = [value for key, value in checks.items() if key not in {"authentication", "external_integrations"} and isinstance(value, str)]
+    statuses = [value for key, value in checks.items() if key not in {"authentication", "external_integrations", "database_engine"} and isinstance(value, str)]
     overall = "ERROR" if "ERROR" in statuses else (
         "OFFLINE" if "OFFLINE" in statuses else (
             "NOT_CONFIGURED" if "NOT_CONFIGURED" in statuses or checks["authentication"] == "NOT_CONFIGURED" else "ONLINE"
@@ -275,7 +279,13 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
     configured_static = os.environ.get("AI_MEDIA_STATIC_ROOT", "").strip()
     built_static = project_root / "dist"
     static_root = Path(configured_static).resolve() if configured_static else (built_static if (built_static / "index.html").is_file() else project_root)
-    resolved_db = Path(db_path or os.environ.get("AI_MEDIA_DB_PATH", project_root / "data" / "dashboard.sqlite3"))
+    configured_database = os.environ.get("DATABASE_URL", "").strip()
+    if db_path is not None:
+        resolved_db: str | Path = db_path
+    elif is_mysql_url(configured_database):
+        resolved_db = configured_database
+    else:
+        resolved_db = os.environ.get("AI_MEDIA_DB_PATH", str(project_root / "data" / "dashboard.sqlite3"))
     master_password = os.environ.get("OWNER_MASTER_PASSWORD", "")
     token = owner_token if owner_token is not None else (master_password or os.environ.get("OWNER_API_TOKEN", ""))
     if owner_token is None and master_password and not re.fullmatch(r"[0-9]{6}", master_password):
@@ -296,8 +306,8 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
         def __init__(self, *args: Any, **kwargs: Any):
             super().__init__(*args, directory=str(static_root), **kwargs)
 
-        def log_message(self, fmt: str, *args: Any) -> None:
-            sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+        def log_message(self, format: str, *args: Any) -> None:
+            sys.stderr.write("%s - %s\n" % (self.address_string(), format % args))
 
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
             raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -353,7 +363,7 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 self._send_json(problem.status, {"error": {"code": problem.code, "message": problem.message}})
             except IntegrationProblem as problem:
                 self._log_failure(problem.code, problem.message)
-                envelope = {"error": {"code": problem.code, "message": problem.message}}
+                envelope: dict[str, Any] = {"error": {"code": problem.code, "message": problem.message}}
                 if problem.details:
                     envelope["error"]["details"] = problem.details
                 self._send_json(problem.status, envelope)
@@ -384,7 +394,7 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 self._send_json(409 if code in conflict_codes else 400, {
                     "error": {"code": code if code in messages else "invalid_request", "message": messages.get(code, "تعذّر تنفيذ الطلب أو أن بعض حقوله غير صالحة.")}
                 })
-            except sqlite3.IntegrityError:
+            except (sqlite3.IntegrityError, MySQLIntegrityError):
                 self._log_failure("data_conflict", "data_conflict")
                 self._send_json(409, {"error": {"code": "data_conflict", "message": "يتعارض هذا السجل مع قيمة أو علاقة موجودة."}})
             except Exception:
@@ -415,13 +425,14 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             self._run(self._get_api)
 
         def _serve_generated_media(self, generation_id: str, media_kind: str) -> None:
+            media_path: Path | None = None
             try:
                 self._authenticate()
                 media = media_generator.media_path(generation_id, media_kind)
                 if media is None:
                     raise ApiProblem(404, "media_not_found", "ملف الوسائط غير متوفر أو انتهت صلاحيته المحلية.")
-                path, content_type = media
-                size = path.stat().st_size
+                media_path, content_type = media
+                size = media_path.stat().st_size
                 self.send_response(200)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(size))
@@ -429,7 +440,7 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Content-Disposition", "inline")
                 self.end_headers()
-                with path.open("rb") as stream:
+                with media_path.open("rb") as stream:
                     while chunk := stream.read(1024 * 1024):
                         self.wfile.write(chunk)
             except ApiProblem as problem:
@@ -440,6 +451,9 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 self._send_json(problem.status, {"error": {"code": problem.code, "message": problem.message}})
             except OSError:
                 self._send_json(404, {"error": {"code": "media_not_found", "message": "ملف الوسائط غير متوفر."}})
+            finally:
+                if media_path is not None:
+                    media_generator.release_media(media_path)
 
         def do_HEAD(self) -> None:
             if self._api():
@@ -544,7 +558,22 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             if path == "/api/tools":
                 return {"tools": company_store.list_tools()}
             if path == "/api/external-integrations":
-                return integration_store.snapshot()
+                try:
+                    limit = int(query.get("limit", "5"))
+                    offset = int(query.get("offset", "0"))
+                except (TypeError, ValueError) as error:
+                    raise ApiProblem(400, "invalid_pagination", "حد الصفحة أو موضعها غير صالح.") from error
+                if not 1 <= limit <= 100 or not 0 <= offset <= 1_000_000:
+                    raise ApiProblem(400, "invalid_pagination", "حد الصفحة من 1 إلى 100 والموضع من 0 إلى 1000000.")
+                issues_value = str(query.get("issues", "")).casefold()
+                if issues_value not in {"", "0", "1", "false", "true"}:
+                    raise ApiProblem(400, "invalid_filter", "قيمة مرشح المشكلات غير صالحة.")
+                return integration_store.snapshot(
+                    limit=limit,
+                    offset=offset,
+                    search=str(query.get("q", ""))[:120],
+                    problems=issues_value in {"1", "true"},
+                )
             generation_match = re.fullmatch(r"/api/external-integrations/generations/([a-f0-9]{32})", path)
             if generation_match:
                 return media_generator.poll_generation(generation_match.group(1), "owner")
@@ -625,8 +654,12 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             if path == "/api/external-integrations/rotate":
                 if set(payload) != {"provider", "service"}:
                     raise ApiProblem(400, "invalid_fields", "يلزم إرسال اسم المزود ونوع الخدمة فقط.")
-                _reject_secret_material(payload.get("provider"), payload.get("service"))
-                account = integration_store.rotate_next(payload.get("service"), payload.get("provider"), actor)
+                provider = payload.get("provider")
+                service = payload.get("service")
+                if not isinstance(provider, str) or not isinstance(service, str):
+                    raise ApiProblem(400, "invalid_fields", "يلزم إرسال اسم المزود ونوع الخدمة كنص.")
+                _reject_secret_material(provider, service)
+                account = integration_store.rotate_next(service, provider, actor)
                 return {"account": account}
             _reject_secret_material(*payload.values())
             if path == "/api/departments":
@@ -900,8 +933,8 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
 
 def main() -> None:
     load_local_env()
-    bind = os.environ.get("HOST", "127.0.0.1")
-    port = int(os.environ.get("PORT", "8080"))
+    bind = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", "3000"))
     handler = make_handler()
     server = ThreadingHTTPServer((bind, port), handler)
     print(f"AI Media OS listening at http://{bind}:{port}")

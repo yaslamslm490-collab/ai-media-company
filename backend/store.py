@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from .database import MySQLConnection, connect_mysql, ensure_migration_table, is_mysql_url, migration_applied, record_migration
 
 TASK_STATUSES = {"TODO", "IN_PROGRESS", "WAITING_APPROVAL", "COMPLETED", "CANCELLED", "FAILED"}
 TASK_PRIORITIES = {"LOW", "NORMAL", "HIGH", "URGENT"}
@@ -23,9 +25,24 @@ def new_id() -> str:
 
 class Store:
     def __init__(self, path: str | Path):
-        self.path = Path(path)
+        raw_path = str(path)
+        self.database_url = raw_path if is_mysql_url(raw_path) else None
+        if os.environ.get("REQUIRE_DATABASE_URL", "").strip().lower() in {"1", "true", "yes"} and not self.database_url:
+            raise RuntimeError("DATABASE_URL is required for the durable deployment; refusing ephemeral SQLite fallback.")
+        self.path = None if self.database_url else Path(raw_path)
 
-    def connect(self) -> sqlite3.Connection:
+    @property
+    def is_mysql(self) -> bool:
+        return self.database_url is not None
+
+    @property
+    def engine_name(self) -> str:
+        return "MySQL المُدار" if self.is_mysql else "SQLite محلي"
+
+    def connect(self) -> Any:
+        if self.database_url:
+            return connect_mysql(self.database_url)
+        assert self.path is not None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=5)
         connection.row_factory = sqlite3.Row
@@ -35,6 +52,9 @@ class Store:
 
     def initialize(self) -> None:
         with self.connect() as db:
+            ensure_migration_table(db)
+            if migration_applied(db, "001-core-v1"):
+                return
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
@@ -121,6 +141,7 @@ class Store:
                     updated_at TEXT NOT NULL
                 );
             """)
+            record_migration(db, "001-core-v1", utc_now())
 
     def ping(self) -> bool:
         with self.connect() as db:
@@ -130,7 +151,7 @@ class Store:
     def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
         return dict(row) if row is not None else None
 
-    def log_activity(self, db: sqlite3.Connection, *, actor: str, action: str, module: str,
+    def log_activity(self, db: Any, *, actor: str, action: str, module: str,
                      object_type: str, object_id: str, status: str = "SUCCESS",
                      result: str = "", error: str = "") -> dict[str, Any]:
         record = {

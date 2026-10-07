@@ -16,6 +16,7 @@ ASSETS = (
     "app.js",
     "frontend/app.js",
     "frontend/api.js",
+    "frontend/account-browser.js",
     "frontend/status.js",
     "frontend/company-builder.js",
 )
@@ -42,8 +43,9 @@ def main() -> None:
         shutil.copy2(ROOT / rel, destination)
 
     built_app = (DIST / "frontend" / "app.js").read_text(encoding="utf-8")
-    if "./company-builder.js" not in built_app:
-        raise SystemExit("built entry point is missing the Company Builder import")
+    for expected in ("./company-builder.js", "./account-browser.js"):
+        if expected not in built_app:
+            raise SystemExit(f"built entry point is missing the {expected} import")
     for rel in ASSETS:
         if not (DIST / rel).is_file():
             raise SystemExit(f"build output missing asset: {rel}")
