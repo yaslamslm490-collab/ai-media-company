@@ -48,7 +48,6 @@
           <button class="button button-quiet owner-auth-button" id="auth-button" type="button"><span id="auth-button-icon">◇</span><span id="auth-button-label">تهيئة الوصول</span></button>
         </div>
       </header>
-
       <div class="page-wrap">
         <section class="page-heading">
           <div>
@@ -60,16 +59,34 @@
         </section>
         <div id="global-message" class="global-message" hidden></div>
         <div id="page-content" aria-live="polite"><div class="panel loading-state"><span class="loader"></span><strong>جار التحقق من الخادم وقاعدة البيانات…</strong></div></div>
-        <footer class="page-footer"><span id="footer-health"><i class="live-dot"></i> جار التحقق من حالة الخدمات</span><span>AI MEDIA OS <b>·</b> بيانات فعلية فقط · تخزين SQLite محلي</span></footer>
+        <section id="execution-reports" class="execution-reports" aria-live="polite"></section>
+        <footer class="page-footer"><span id="footer-health"><i class="live-dot"></i> جار التحقق من حالة الخدمات</span><span>AI MEDIA OS <b>·</b> بيانات فعلية فقط · تخزين دائم للبيانات</span></footer>
       </div>
     </main>
   </div>
+  <section class="inline-command-bar" aria-label="شريط التفاعل متعدد الوسائط">
+    <div class="inline-command-inner">
+      <span class="command-mark">#</span>
+      <textarea id="command-input" rows="1" maxlength="4000" placeholder="اكتب أمراً طويلاً أو تحدث مباشرة…" autocomplete="off"></textarea>
+      <div class="inline-command-actions">
+        <button class="icon-button tiny command-attach" id="command-attach" type="button" title="إرفاق صورة أو فيديو أو صوت" aria-label="إرفاق وسائط">＋</button>
+        <input id="command-file" type="file" accept="image/*,video/*,audio/*" hidden />
+        <button class="icon-button tiny command-mic" id="command-mic" type="button" title="إدخال صوتي عربي مباشر" aria-label="إدخال صوتي عربي مباشر">🎙️</button>
+        <button class="icon-button tiny voice-live-toggle" id="voice-live-toggle" type="button" title="بدء المحادثة الصوتية الحرة" aria-label="بدء المحادثة الصوتية الحرة">🎙️💬</button>
+        <button class="icon-button tiny command-record" id="command-record" type="button" title="بدء أو إيقاف التسجيل الاحتياطي" aria-label="بدء أو إيقاف التسجيل الاحتياطي">●</button>
+        <button class="icon-button tiny voice-mute" id="voice-mute" type="button" title="كتم الرد الصوتي" aria-label="كتم الرد الصوتي" hidden>🔇</button>
+        <button class="button button-primary command-send" id="command-send" type="button" title="إرسال الأمر" aria-label="إرسال الأمر">➤</button>
+      </div>
+    </div>
+    <div class="inline-command-meta"><span id="command-attachment-name">لا توجد مرفقات</span><span id="command-execution-state">جاهز للتنفيذ</span><span id="voice-status" class="voice-status ready">🔵 جاهز</span><span id="command-recording-state">جاهز</span><span id="voice-waveform" class="voice-waveform" hidden><i></i><i></i><i></i><i></i><i></i></span></div>
+  </section>
 
   <div class="overlay" id="auth-overlay" hidden>
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
       <div class="modal-head"><div><span class="modal-kicker">حماية مساحة العمل</span><h2 id="auth-title">دخول المالك</h2></div><button class="icon-button" data-close="auth-overlay" aria-label="إغلاق">×</button></div>
       <p class="modal-help">أدخل كلمة مرور المالك المضبوطة على الخادم للتحقق من هويتك. لا تُحفظ في ملفات الموقع، بل في جلسة المتصفح الحالية فقط.</p>
-      <form id="auth-form"><label class="field-label" for="owner-token-input">كلمة مرور المالك</label><input class="text-field" id="owner-token-input" type="password" autocomplete="current-password" required maxlength="256" placeholder="أدخل كلمة مرور المالك" /><div id="auth-error" class="form-error" hidden></div><div class="form-actions"><button type="button" class="button button-quiet" id="clear-token-button">مسح الجلسة</button><button class="button button-primary" type="submit">التحقق والدخول</button></div></form>
+      <form id="auth-form"><label class="field-label" for="owner-token-input">كلمة مرور المالك</label><input class="text-field" id="owner-token-input" type="password" autocomplete="current-password" required maxlength="256" placeholder="أدخل رمز المالك من 6 أرقام" /><button type="button" class="text-link forgot-password-link" id="forgot-password-toggle">هل نسيت كلمة السر؟</button><div id="auth-error" class="form-error" hidden></div><div class="form-actions"><button type="button" class="button button-quiet" id="clear-token-button">مسح الجلسة</button><button class="button button-primary" type="submit">التحقق والدخول</button></div></form>
+      <form id="recovery-form" hidden><div class="security-callout compact-callout"><strong>استعادة طارئة</strong><p>أدخل كود الاسترداد المضبوط كمتغير OWNER_RECOVERY_CODE على الخادم، ثم رمزاً جديداً.</p></div><label class="field-label" for="recovery-code-input">كود الاسترداد</label><input class="text-field" id="recovery-code-input" name="recovery_code" type="password" autocomplete="one-time-code" required /><label class="field-label" for="recovery-new-password">الرمز الجديد</label><input class="text-field" id="recovery-new-password" name="new_password" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required /><label class="field-label" for="recovery-confirm-password">تأكيد الرمز الجديد</label><input class="text-field" id="recovery-confirm-password" name="confirm_password" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required /><div id="recovery-error" class="form-error" hidden></div><div class="form-actions"><button type="button" class="button button-quiet" id="back-to-login">العودة للدخول</button><button class="button button-primary" type="submit">استعادة الرمز</button></div></form>
     </section>
   </div>
 
@@ -98,6 +115,13 @@
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="decision-title">
       <div class="modal-head"><div><span class="modal-kicker">قرار المالك</span><h2 id="decision-title">طلب تعديلات</h2></div><button class="icon-button" data-close="decision-overlay" aria-label="إغلاق">×</button></div>
       <form id="decision-form"><input type="hidden" name="approvalId" /><label class="field-label" for="decision-note">ملاحظة القرار</label><textarea class="text-field textarea-field" id="decision-note" name="note" maxlength="2000" placeholder="اشرح التعديلات المطلوبة…"></textarea><div class="form-error" id="decision-error" hidden></div><div class="form-actions"><button type="button" class="button button-quiet" data-close="decision-overlay">إلغاء</button><button class="button button-primary" type="submit">حفظ القرار</button></div></form>
+    </section>
+  </div>
+  <div class="overlay" id="service-integration-overlay" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="service-integration-title">
+      <div class="modal-head"><div><span class="modal-kicker">تكاملات المالك</span><h2 id="service-integration-title">إدارة / إضافة يدوي</h2></div><button class="icon-button" data-close="service-integration-overlay" aria-label="إغلاق">×</button></div>
+      <p class="modal-help">تُستخدم القيمة اليدوية كبديل عن القراءة الآلية من بيئة الخادم. يُرسل السر إلى الخادم عبر HTTPS ويُشفّر في خزنة الوسائط.</p>
+      <form id="service-integration-form"><input type="hidden" name="service_key" value="manus" /><label class="field-label">اسم التكامل</label><input class="text-field" name="label" required maxlength="120" /><label class="field-label">الرابط أو endpoint</label><input class="text-field" name="endpoint" type="url" maxlength="2000" placeholder="https://…" /><label class="field-label">المفتاح / السر الحساس</label><div class="password-input-wrap"><input class="text-field" name="credential" type="password" maxlength="8192" autocomplete="new-password" placeholder="لا يظهر بعد الحفظ" /><button class="icon-button tiny password-visibility-toggle" type="button" data-toggle-secret aria-label="إظهار أو إخفاء السر">◉</button></div><div id="service-integration-error" class="form-error" hidden></div><div class="form-actions"><button type="button" class="button button-quiet" data-close="service-integration-overlay">إلغاء</button><button class="button button-primary" type="submit">حفظ مشفراً</button></div></form>
     </section>
   </div>
   <div class="toast-region" id="toast-region" aria-live="polite"></div>

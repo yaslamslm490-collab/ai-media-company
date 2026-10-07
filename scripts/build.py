@@ -15,6 +15,7 @@ ASSETS = (
     "manus-routes.json",
     "app.js",
     "frontend/app.js",
+    "frontend/voice-engine.js",
     "frontend/api.js",
     "frontend/account-browser.js",
     "frontend/status.js",
@@ -43,7 +44,7 @@ def main() -> None:
         shutil.copy2(ROOT / rel, destination)
 
     built_app = (DIST / "frontend" / "app.js").read_text(encoding="utf-8")
-    for expected in ("./company-builder.js", "./account-browser.js"):
+    for expected in ("./company-builder.js", "./account-browser.js", "./voice-engine.js"):
         if expected not in built_app:
             raise SystemExit(f"built entry point is missing the {expected} import")
     for rel in ASSETS:

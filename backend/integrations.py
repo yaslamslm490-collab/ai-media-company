@@ -103,6 +103,13 @@ class IntegrationStore:
                 );
                 CREATE INDEX IF NOT EXISTS media_generation_jobs_recent_idx
                     ON media_generation_jobs(created_at DESC);
+                CREATE TABLE IF NOT EXISTS manual_integrations (
+                    service_key TEXT PRIMARY KEY,
+                    label TEXT NOT NULL,
+                    endpoint TEXT NOT NULL DEFAULT '',
+                    secret_ciphertext TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
             """)
             columns = table_columns(db, "external_accounts")
             migrations = {
@@ -141,6 +148,32 @@ class IntegrationStore:
                     db.execute("UPDATE account_code_sequences SET last_number=? WHERE prefix=? AND last_number<?", (number, prefix, number))
                 db.execute("CREATE UNIQUE INDEX IF NOT EXISTS external_accounts_account_code_uq ON external_accounts(account_code)")
                 record_migration(db, "004-account-code-v1", utc_now())
+
+    def manual_snapshot(self, automatic: dict[str, str]) -> list[dict[str, Any]]:
+        with self.store.connect() as db:
+            rows = {row["service_key"]: dict(row) for row in db.execute("SELECT service_key,label,endpoint,updated_at FROM manual_integrations").fetchall()}
+        keys = ["manus", "github", "external_integrations", "media_vault", "object_storage"]
+        return [{"key": key, "label": key.replace("_", " ").title(), "automatic_status": automatic.get(key, "NOT_CONFIGURED"), "manual_status": "CONFIGURED" if key in rows else "NOT_CONFIGURED", "source": "manual" if key in rows else "automatic", "endpoint": rows.get(key, {}).get("endpoint", ""), "updated_at": rows.get(key, {}).get("updated_at", "")} for key in keys]
+
+    def upsert_manual(self, payload: dict[str, Any], actor: str) -> dict[str, Any]:
+        key = self._text(payload, "service_key", required=True, maximum=80).lower()
+        if key not in {"manus", "github", "external_integrations", "media_vault", "object_storage"}:
+            raise IntegrationProblem(400, "invalid_service", "الخدمة غير مدعومة.")
+        label = self._text(payload, "label", required=True, maximum=120)
+        endpoint = self._text(payload, "endpoint", required=False, maximum=2000)
+        credential = self._text(payload, "credential", required=False, maximum=8192)
+        with self.store.connect() as db:
+            previous = db.execute("SELECT secret_ciphertext FROM manual_integrations WHERE service_key=?", (key,)).fetchone()
+            if not credential and previous is None:
+                raise IntegrationProblem(400, "credential_required", "أدخل مفتاحاً أو سراً عند إنشاء التكامل اليدوي.")
+            ciphertext = self._vault().encrypt(credential.encode("utf-8")).decode("ascii") if credential else previous["secret_ciphertext"]
+            now = utc_now()
+            if previous is None:
+                db.execute("INSERT INTO manual_integrations(service_key,label,endpoint,secret_ciphertext,updated_at) VALUES (?,?,?,?,?)", (key, label, endpoint, ciphertext, now))
+            else:
+                db.execute("UPDATE manual_integrations SET label=?, endpoint=?, secret_ciphertext=?, updated_at=? WHERE service_key=?", (label, endpoint, ciphertext, now, key))
+            self.store.log_activity(db, actor=actor, action="integration.manual_updated", module="settings", object_type="integration", object_id=key, result="manual integration updated")
+        return {"key": key, "label": label, "endpoint": endpoint, "source": "manual", "manual_status": "CONFIGURED", "updated_at": now}
 
     @staticmethod
     def _account_prefix(provider: str, requested: Any = None) -> str:

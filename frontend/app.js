@@ -2,6 +2,7 @@ import {api, ApiError} from './api.js';
 import {formatDate, label, statusClass} from './status.js';
 import {handleCompanyClick, handleCompanySubmit, isCompanyBuilderRoute, isEmployeeRoute, renderCompanyPage} from './company-builder.js';
 import {renderAccountResults, renderAccountSearch} from './account-browser.js';
+import {VoiceEngine} from './voice-engine.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -278,8 +279,169 @@ function securityPage() {
   return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">الأمان والوصول</h2><div class="panel-caption">صلاحية واحدة للمالك في هذه المرحلة؛ لا توجد حسابات أعضاء أو أدوار متعددة.</div></div>${statusBadge(state.health?.checks?.authentication || 'ERROR')}</div><div class="security-callout"><strong>${state.health?.checks?.authentication === 'ONLINE' ? 'كلمة مرور المالك مضبوطة على الخادم.' : 'كلمة مرور المالك غير مهيأة.'}</strong><p>الواجهات الخاصة تتطلب OWNER_MASTER_PASSWORD (أو OWNER_API_TOKEN للتوافق) عبر ترويسة X-Owner-Token. السر لا يُضمّن في الملفات ولا يُرسل إلى سجل النشاط. يخزنه المتصفح في sessionStorage للجلسة الحالية فقط.</p>${state.authorized ? '<button class="button button-quiet" id="logout-button">إنهاء جلسة المالك</button>' : '<button class="button button-primary" data-open-auth>إدخال كلمة مرور المالك</button>'}</div></section><section class="panel health-embed"><div class="panel-heading"><div><h2 class="panel-title">حالة النظام الفعلية</h2><div class="panel-caption">الاتصال بالخادم وقاعدة البيانات مفحوص عند الطلب.</div></div><button class="button button-quiet" id="refresh-health">إعادة الفحص</button></div>${healthCards(state.health)}</section>`;
 }
 function settingsPage() {
-  return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">إعدادات التشغيل</h2><div class="panel-caption">إعدادات تُقرأ من بيئة الخادم ولا تُعرض أسرارها.</div></div></div><div class="setting-row"><div class="setting-copy"><strong>Backend API</strong><small>نفس المصدر · /api</small></div>${statusBadge(state.health?.checks?.backend || 'ERROR')}</div><div class="setting-row"><div class="setting-copy"><strong>قاعدة البيانات</strong><small>${esc(state.health?.checks?.database_engine || 'محرك غير معروف')}</small></div>${statusBadge(state.health?.checks?.database || 'ERROR')}</div><div class="setting-row"><div class="setting-copy"><strong>المصادقة</strong><small>OWNER_MASTER_PASSWORD من بيئة الخادم</small></div>${statusBadge(state.health?.checks?.authentication || 'NOT_CONFIGURED')}</div><div class="setting-row"><div class="setting-copy"><strong>حسابات الفيديو والصوت</strong><small>حتى 20 حساباً مشفراً · خمس نتائج لكل صفحة · تدوير Round-robin</small></div><button class="button button-quiet" type="button" data-page="external-integrations">إدارة الحسابات</button></div>${Object.entries(state.health?.checks || {}).filter(([key]) => !['backend','database','database_engine','authentication'].includes(key)).map(([key,value]) => `<div class="setting-row"><div class="setting-copy"><strong>${esc(key)}</strong><small>تُضبط بمتغيرات بيئة الخادم فقط</small></div>${typeof value === 'string' ? statusBadge(value) : statusBadge('NOT_CONFIGURED')}</div>`).join('')}<p class="panel-caption">مفاتيح الحسابات الخارجية تُحفظ مشفرة على الخادم ولا تُعرض في هذه الصفحة. انظر README.md لتفاصيل الإعداد والتخزين.</p></section>`;
+  const checks = Object.entries(state.health?.checks || {}).filter(([key]) => !['backend', 'database', 'database_engine', 'authentication'].includes(key));
+  const externalRows = checks.map(([key, value]) => `<div class="setting-row"><div class="setting-copy"><strong>${esc(key)}</strong><small>قراءة آلية من بيئة الخادم</small></div>${typeof value === 'string' ? statusBadge(value) : statusBadge('NOT_CONFIGURED')}</div>`).join('');
+  const services = state.serviceIntegrations || [];
+  const serviceRows = services.map((item) => `<article class="integration-source-card"><div><strong>${esc(item.label)}</strong><small>مصدر آلي: ${esc(label(item.automatic_status))} · يدوي: ${esc(label(item.manual_status))}</small></div><span class="source-badge ${item.source === 'manual' ? 'manual' : 'automatic'}">مصدر: ${item.source === 'manual' ? 'مدخل يدوي' : 'الخادم آلياً'}</span><button class="button button-quiet small-button" type="button" data-manage-service="${esc(item.key)}">إدارة / إضافة يدوي</button></article>`).join('');
+  return `<section class="panel password-settings-panel"><div class="panel-heading"><div><h2 class="panel-title">تغيير كلمة السر</h2><div class="panel-caption">يتطلب الرمز الحالي والرمز الجديد وتأكيده؛ يُحفظ التغيير بشكل دائم على الخادم.</div></div><span class="security-lock">⌁</span></div><form id="owner-password-form" class="compact-form"><label class="field-label">كلمة السر الحالية</label><input class="text-field" name="current_password" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="current-password" required /><label class="field-label">كلمة السر الجديدة</label><input class="text-field" name="new_password" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="new-password" required /><label class="field-label">تأكيد كلمة السر الجديدة</label><input class="text-field" name="confirm_password" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="new-password" required /><div id="owner-password-error" class="form-error" hidden></div><div class="form-actions"><button class="button button-primary" type="submit">حفظ كلمة السر بشكل دائم</button></div></form></section><section class="panel"><div class="panel-heading"><div><h2 class="panel-title">إعدادات التشغيل والتكاملات</h2><div class="panel-caption">كل خدمة تُقرأ آلياً من بيئة الخادم، ويمكن إضافة إعداد يدوي مشفّر عند الحاجة.</div></div><button class="button button-primary" type="button" id="add-integration-button">＋ إضافة تكامل</button></div><div class="integration-source-list">${serviceRows || emptyState('جار تحميل التكاملات', 'أعد فتح الإعدادات بعد لحظات.')}</div><div class="panel-divider"></div><div class="setting-row"><div class="setting-copy"><strong>Backend API</strong><small>نفس المصدر · /api</small></div>${statusBadge(state.health?.checks?.backend || 'ERROR')}</div><div class="setting-row"><div class="setting-copy"><strong>قاعدة البيانات</strong><small>${esc(state.health?.checks?.database_engine || 'محرك غير معروف')}</small></div>${statusBadge(state.health?.checks?.database || 'ERROR')}</div><div class="setting-row"><div class="setting-copy"><strong>المصادقة</strong><small>OWNER_MASTER_PASSWORD من بيئة الخادم</small></div>${statusBadge(state.health?.checks?.authentication || 'NOT_CONFIGURED')}</div>${externalRows}<p class="panel-caption">المفاتيح اليدوية لا تعود إلى المتصفح بعد الحفظ؛ زر العين يبدّل إظهار الحقل قبل الإرسال فقط. يتطلب حفظ الأسرار مفتاح AI_MEDIA_VAULT_KEY مهيأً على الخادم.</p></section>`;
 }
+function openServiceModal(key = 'manus') {
+  const modal = $('#service-integration-overlay');
+  if (!modal) return;
+  modal.querySelector('[name="service_key"]').value = key;
+  modal.querySelector('[name="label"]').value = key.replaceAll('_', ' ');
+  openModal('service-integration-overlay');
+}
+async function loadServiceIntegrations() {
+  if (!state.authorized) return;
+  try { state.serviceIntegrations = (await api.serviceIntegrations()).integrations || []; } catch (error) { toast(apiFailure(error), 'error'); }
+}
+let recorder = null;
+let recordedChunks = [];
+let inlineAttachment = null;
+let voiceEngine = null;
+function setVoiceState(stateName) {
+  const labels = {ready: '🔵 جاهز', listening: '🎙️ يستمع', processing: '🧠 يعالج', speaking: '🔊 يتحدث'};
+  const node = $('#voice-status'); if (node) { node.textContent = labels[stateName] || labels.ready; node.className = `voice-status ${stateName}`; }
+  const wave = $('#voice-waveform'); if (wave) wave.hidden = stateName !== 'speaking';
+  const mute = $('#voice-mute'); if (mute) mute.hidden = !voiceEngine?.running;
+  const toggle = $('#voice-live-toggle'); if (toggle) { toggle.classList.toggle('voice-active', Boolean(voiceEngine?.running)); toggle.title = voiceEngine?.running ? 'إيقاف المحادثة الصوتية الحرة' : 'بدء المحادثة الصوتية الحرة'; }
+}
+async function handleLiveVoiceTranscript(text) {
+  setVoiceState('processing');
+  try {
+    const result = await sendCommand(text, 'live-voice');
+    if (voiceEngine?.running) voiceEngine.speak(result?.page ? result.message : (result?.response || result?.message || 'تم تنفيذ الأمر.'));
+  } catch (error) { voiceEngine?.completeProcessing(); toast(apiFailure(error), 'error'); }
+}
+function installVoiceConversation() {
+  voiceEngine = new VoiceEngine({onState: setVoiceState, onTranscript: handleLiveVoiceTranscript, onError: (message) => toast(message, 'error')});
+  $('#voice-live-toggle').addEventListener('click', async () => {
+    if (!state.authorized) return openModal('auth-overlay');
+    if (voiceEngine.running) { voiceEngine.stop(); toast('تم إيقاف المحادثة الصوتية الحرة.'); return; }
+    try { await voiceEngine.start(); toast('المحادثة الصوتية مفعلة؛ تحدث الآن.'); }
+    catch (error) { setVoiceState('ready'); toast(error.message || 'تعذر تفعيل المحادثة الصوتية.', 'error'); }
+  });
+  $('#voice-mute').addEventListener('click', () => { voiceEngine.mute(); toast('تم كتم الرد الصوتي؛ سيستمر الاستماع.'); });
+  setVoiceState('ready');
+}
+function commandValue() { return $('#command-input')?.value.trim() || ''; }
+function setCommandMeta(id, text) { const node = $(`#${id}`); if (node) node.textContent = text; }
+function executionDuration(report) { return report.duration_ms ? `${Math.max(1, Math.round(report.duration_ms / 1000))}s` : '—'; }
+function renderExecutionReport(report) {
+  const host = $('#execution-reports'); if (!host || !report) return;
+  const tests = (report.tests || []).map((test) => `<li class="test-${esc(test.status)}"><b>${esc(test.name)}</b><span>${esc(test.status === 'PASS' ? 'PASS' : test.status === 'NOT_TESTED' ? 'لم يتم الاختبار' : test.status)}</span><small>${esc(test.detail || '')}</small></li>`).join('');
+  const steps = (report.steps || []).map((step) => `<li><span class="step-status">${step.status === 'COMPLETED' ? '✓' : '…'}</span><div><b>${esc(step.label)}</b><small>${esc(step.description || '')}</small><time>${esc(step.finished_at || '')}</time></div></li>`).join('');
+  const changes = (report.changes || []).map((change) => `<li><b>${esc(change.target)}</b> — ${esc(change.description)}</li>`).join('') || '<li>لا توجد تغييرات مسجلة.</li>';
+  const snapshot = report.snapshot?.id ? `<div class="snapshot-line">Snapshot: <code>${esc(report.snapshot.id)}</code> · ${esc(report.snapshot.created_at)}</div><button type="button" class="button button-quiet report-restore" title="استعادة قاعدة SQLite من هذه النسخة">استعادة Snapshot</button>` : '<div class="snapshot-line">لم يتم إنشاء Snapshot لهذه العملية.</div>';
+  const preview = report.preview_url || window.location.origin;
+  const card = document.createElement('article'); card.className = `execution-report-card ${report.status === 'SUCCESS' ? 'success' : 'failed'}`;
+  card.innerHTML = `<div class="execution-report-head"><div><span class="report-kicker">Execution ID: ${esc(report.id)}</span><h3>${report.status === 'SUCCESS' ? '🟢 التنفيذ مكتمل' : '🔴 فشل التنفيذ'} — ${esc(executionDuration(report))}</h3><p>${esc(report.command)}</p></div><button class="icon-button report-speak" type="button" title="قراءة التقرير صوتياً" aria-label="قراءة التقرير صوتياً">🔊</button></div><div class="report-meta"><span>المستخدم: ${esc(report.actor)}</span><span>بدأ: ${esc(report.started_at)}</span><span>انتهى: ${esc(report.finished_at || 'قيد التنفيذ')}</span></div><details open><summary>ما تم تنفيذه فعلياً</summary><ol class="execution-steps">${steps}</ol><ul class="execution-changes">${changes}</ul></details><details><summary>الاختبارات والنتائج الحقيقية</summary><ul class="execution-tests">${tests || '<li>لم يتم الاختبار.</li>'}</ul></details><details><summary>النسخ الاحتياطية</summary>${snapshot}</details><a class="button button-quiet report-preview-link" href="${esc(preview)}" target="_blank" rel="noopener">🔗 فتح المعاينة الفعلية</a>`;
+  card.querySelector('.report-speak').addEventListener('click', () => voiceEngine?.speak(`تقرير التنفيذ: ${report.status === 'SUCCESS' ? 'نجح' : 'فشل'}. ${report.command}. ${report.steps?.map((step) => step.label).join('، ') || ''}`));
+  card.querySelector('.report-restore')?.addEventListener('click', async () => { if (!window.confirm('استعادة Snapshot ستستبدل قاعدة SQLite الحالية. هل تريد المتابعة؟')) return; try { await api.restoreExecutionReport(report.id); toast('تمت استعادة Snapshot. أعد تحميل اللوحة للتحقق.'); } catch (error) { toast(apiFailure(error), 'error'); } });
+  host.prepend(card);
+}
+function renderPendingExecution(command) {
+  const host = $('#execution-reports'); if (!host) return null;
+  const card = document.createElement('article'); card.className = 'execution-report-card running';
+  card.innerHTML = `<div class="execution-report-head"><div><span class="report-kicker">Execution ID: قيد الإنشاء</span><h3>🟡 قيد التنفيذ</h3><p>${esc(command)}</p></div><span class="loader"></span></div><div class="live-report-steps">🟡 تحليل الأمر…<br>🔵 تحديد المكونات المتأثرة…<br>🔵 تشغيل التنفيذ والاختبارات…<br>🔵 حفظ التقرير وSnapshot…</div>`;
+  host.prepend(card); return card;
+}
+async function sendCommand(command, source = 'text', audioBase64 = '', attachment = null) {
+  if (!command && !audioBase64 && !attachment) return toast('اكتب أمراً أو أضف مرفقاً أولاً.', 'error');
+  if (!state.authorized) return openModal('auth-overlay');
+  const button = $('#command-send'); if (button) button.disabled = true;
+  setCommandMeta('command-execution-state', 'جار تنفيذ الأمر…');
+  const pendingCard = renderPendingExecution(command || 'مرفق صوتي أو وسائط');
+  try {
+    const body = {command, source};
+    if (audioBase64) body.audio_base64 = audioBase64;
+    if (attachment) Object.assign(body, {attachment_base64: attachment.data, attachment_name: attachment.name, attachment_type: attachment.type});
+    const result = await api.sendCommand(body);
+    pendingCard?.remove(); if (result.report) renderExecutionReport(result.report);
+    $('#command-input').value = ''; inlineAttachment = null; setCommandMeta('command-attachment-name', 'لا توجد مرفقات');
+    if (result.stages?.length) setCommandMeta('command-execution-state', result.stages.map((stage) => `${stage.status === 'COMPLETED' ? '✓' : '…'} ${stage.label}`).join(' · '));
+    else setCommandMeta('command-execution-state', 'تم الاستلام');
+    toast(result.page ? `${result.message} (#${result.page.slug})` : (result.message || 'تم استلام الأمر.'));
+    return result;
+  } catch (error) { if (pendingCard) { pendingCard.classList.add('failed'); pendingCard.querySelector('h3').textContent = '🔴 فشل التنفيذ'; } toast(apiFailure(error), 'error'); if (source === 'live-voice') throw error; }
+  finally { if (button) button.disabled = false; }
+}
+function autosizeCommand() { const input = $('#command-input'); if (input) { input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 150)}px`; } }
+function installCommandBar() {
+  $('#command-send').addEventListener('click', () => sendCommand(commandValue(), 'text', '', inlineAttachment));
+  $('#command-input').addEventListener('input', autosizeCommand);
+  $('#command-input').addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendCommand(commandValue(), 'text', '', inlineAttachment); } });
+  $('#command-attach').addEventListener('click', () => $('#command-file').click());
+  $('#command-file').addEventListener('change', () => {
+    const file = $('#command-file').files?.[0]; if (!file) return;
+    const reader = new FileReader(); reader.onload = () => { inlineAttachment = {name: file.name, type: file.type, data: reader.result}; setCommandMeta('command-attachment-name', `مرفق: ${file.name}`); }; reader.readAsDataURL(file);
+  });
+  $('#command-mic').addEventListener('click', () => {
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Recognition) return toast('الإدخال الصوتي المباشر غير مدعوم؛ استخدم زر التسجيل الاحتياطي.', 'error');
+    const recognition = new Recognition(); recognition.lang = 'ar-SA'; recognition.interimResults = true; recognition.continuous = false; let finalText = '';
+    recognition.onstart = () => { $('#command-mic').classList.add('is-listening'); setCommandMeta('command-recording-state', 'يستمع بالعربية…'); };
+    recognition.onresult = (event) => { finalText = [...event.results].map((result) => result[0].transcript).join(''); $('#command-input').value = finalText; autosizeCommand(); };
+    recognition.onerror = () => toast('تعذر التعرف الصوتي؛ استخدم التسجيل الاحتياطي.', 'error');
+    recognition.onend = () => { $('#command-mic').classList.remove('is-listening'); setCommandMeta('command-recording-state', 'جاهز'); if (finalText.trim()) sendCommand(finalText, 'stt'); };
+    recognition.start();
+  });
+}
+function installRecorder() {
+  $('#command-record').addEventListener('click', async () => {
+    if (recorder?.state === 'recording') { recorder.stop(); return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      recorder = new MediaRecorder(stream); recordedChunks = [];
+      recorder.ondataavailable = (event) => event.data.size && recordedChunks.push(event.data);
+      recorder.onstop = () => { stream.getTracks().forEach((track) => track.stop()); $('#command-record').classList.remove('is-recording'); setCommandMeta('command-recording-state', 'تسجيل جاهز للإرسال'); const blob = new Blob(recordedChunks, {type: recorder.mimeType || 'audio/webm'}); const reader = new FileReader(); reader.onloadend = () => sendCommand('', 'audio-recorder', reader.result); reader.readAsDataURL(blob); };
+      recorder.start(); $('#command-record').classList.add('is-recording'); setCommandMeta('command-recording-state', 'جار التسجيل… اضغط ● للإيقاف');
+    } catch (error) { toast('تعذر الوصول إلى الميكروفون؛ تحقق من إذن المتصفح.', 'error'); }
+  });
+}
+
+function responseText(card) {
+  const clone = card.cloneNode(true);
+  clone.querySelectorAll('.response-action-toolbar, .response-share-menu').forEach((node) => node.remove());
+  return clone.innerText.trim();
+}
+function closeResponseMenus(except = null) {
+  $$('.response-share-menu').forEach((menu) => { if (menu !== except) menu.remove(); });
+}
+function createResponseToolbar(card) {
+  if (card.classList.contains('loading-state') || card.classList.contains('error-state') || card.querySelector('.response-action-toolbar')) return;
+  card.classList.add('response-card');
+  const toolbar = document.createElement('div'); toolbar.className = 'response-action-toolbar';
+  toolbar.innerHTML = `<button type="button" data-response-action="copy" title="نسخ التقرير">📋</button><button type="button" data-response-action="share" title="مشاركة أو تصدير">📤</button><button type="button" data-response-action="speak" title="قراءة صوتية">🔊</button><span class="response-toolbar-divider"></span><button type="button" data-response-action="up" title="تقييم إيجابي" aria-label="تقييم إيجابي">👍</button><button type="button" data-response-action="down" title="تقييم سلبي" aria-label="تقييم سلبي">👎</button><button type="button" data-response-action="more" title="خيارات إضافية">⋮</button>`;
+  card.append(toolbar);
+}
+function enhanceResponseToolbars() {
+  $$('#page-content .panel').forEach(createResponseToolbar);
+}
+function showResponseShareMenu(card, button) {
+  closeResponseMenus();
+  const menu = document.createElement('div'); menu.className = 'response-share-menu';
+  menu.innerHTML = '<button type="button" data-share-action="native">مشاركة…</button><button type="button" data-share-action="copy">نسخ النص</button><button type="button" data-share-action="export">تصدير TXT</button>';
+  card.append(menu);
+  menu.querySelector('[data-share-action="native"]').addEventListener('click', async () => { const text = responseText(card); if (navigator.share) { try { await navigator.share({title: 'AI Media OS', text}); } catch {} } else { await navigator.clipboard?.writeText(text); toast('تم نسخ التقرير للمشاركة.'); } closeResponseMenus(); });
+  menu.querySelector('[data-share-action="copy"]').addEventListener('click', async () => { await navigator.clipboard?.writeText(responseText(card)); toast('تم نسخ التقرير.'); closeResponseMenus(); });
+  menu.querySelector('[data-share-action="export"]').addEventListener('click', () => { const blob = new Blob([responseText(card)], {type: 'text/plain;charset=utf-8'}); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'ai-media-report.txt'; link.click(); URL.revokeObjectURL(link.href); toast('تم تصدير التقرير كملف TXT.'); closeResponseMenus(); });
+}
+function installResponseActions() {
+  document.addEventListener('click', async (event) => {
+    const action = event.target.closest('[data-response-action]');
+    if (!action) { if (!event.target.closest('.response-share-menu')) closeResponseMenus(); return; }
+    const card = action.closest('.response-card'); if (!card) return;
+    const value = responseText(card);
+    if (action.dataset.responseAction === 'copy') { await navigator.clipboard?.writeText(value); toast('تم نسخ مخرجات البطاقة.'); }
+    if (action.dataset.responseAction === 'share') showResponseShareMenu(card, action);
+    if (action.dataset.responseAction === 'speak') { if (!('speechSynthesis' in window)) return toast('القراءة الصوتية غير مدعومة في هذا المتصفح.', 'error'); window.speechSynthesis.cancel(); const utterance = new SpeechSynthesisUtterance(value.slice(0, 6000)); utterance.lang = 'ar-SA'; window.speechSynthesis.speak(utterance); toast('بدأت القراءة الصوتية.'); }
+    if (['up','down'].includes(action.dataset.responseAction)) { action.classList.toggle('selected'); toast(action.dataset.responseAction === 'up' ? 'تم تسجيل التقييم الإيجابي.' : 'تم تسجيل ملاحظة التقييم السلبي.'); }
+    if (action.dataset.responseAction === 'more') { const input = $('#command-input'); if (input) { input.value = `أعد توليد هذا الرد:\n${value.slice(0, 1200)}`; autosizeCommand(); input.focus(); toast('تم تجهيز طلب إعادة التوليد في شريط المحادثة.'); } }
+  });
+}
+
 async function modulePage(module) {
   if (isCompanyBuilderRoute(module.id)) return renderCompanyPage(module.id, state);
   if (['ai-team', 'characters', 'projects'].includes(module.id)) return entityPage(module.id);
@@ -333,6 +495,7 @@ async function renderPage(page = state.page) {
     }
     if (revision !== state.renderRevision) return;
     pageContent.innerHTML = markup;
+    enhanceResponseToolbars();
     bindPageEvents();
   } catch (error) {
     if (revision !== state.renderRevision) return;
@@ -374,6 +537,8 @@ function bindPageEvents() {
   $$('[data-open-auth]').forEach((button) => button.addEventListener('click', () => openModal('auth-overlay')));
   $('#logout-button')?.addEventListener('click', logout);
   $('#refresh-health')?.addEventListener('click', refreshHealth);
+  $('#add-integration-button')?.addEventListener('click', () => openServiceModal());
+  $$('[data-manage-service]').forEach((button) => button.addEventListener('click', () => openServiceModal(button.dataset.manageService)));
 }
 async function decideApproval(id, decision, note) {
   try {
@@ -553,6 +718,22 @@ $('#page-content').addEventListener('submit', async (event) => {
     if (button) button.disabled = false;
   }
 });
+$('#service-integration-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget; const button = event.submitter; if (button) button.disabled = true;
+  try { await api.saveServiceIntegration(formObject(form)); toast('تم حفظ التكامل اليدوي مشفراً.'); closeModal('service-integration-overlay'); form.reset(); await loadServiceIntegrations(); if (state.page === 'settings') await renderPage('settings'); }
+  catch (error) { showFormError('service-integration-error', apiFailure(error)); }
+  finally { if (button) button.disabled = false; }
+});
+$('#forgot-password-toggle').addEventListener('click', () => { $('#auth-form').hidden = true; $('#recovery-form').hidden = false; });
+$('#back-to-login').addEventListener('click', () => { $('#recovery-form').hidden = true; $('#auth-form').hidden = false; showFormError('recovery-error'); });
+$('#recovery-form').addEventListener('submit', async (event) => {
+  event.preventDefault(); showFormError('recovery-error');
+  const form = event.currentTarget; const button = event.submitter; if (button) button.disabled = true;
+  try { const values = formObject(form); await api.resetOwnerPassword(values); api.setToken(values.new_password); form.reset(); $('#recovery-form').hidden = true; $('#auth-form').hidden = false; closeModal('auth-overlay'); state.authorized = true; updateAuthUI(); toast('تمت استعادة رمز المالك وحفظه على الخادم.'); await renderPage(state.page); }
+  catch (error) { showFormError('recovery-error', apiFailure(error)); }
+  finally { if (button) button.disabled = false; }
+});
 $('#auth-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   showFormError('auth-error');
@@ -560,6 +741,7 @@ $('#auth-form').addEventListener('submit', async (event) => {
   try {
     state.dashboard = await api.dashboard();
     state.authorized = true;
+    await loadServiceIntegrations();
     updateAuthUI();
     closeModal('auth-overlay');
     $('#owner-token-input').value = '';
@@ -573,6 +755,27 @@ $('#auth-form').addEventListener('submit', async (event) => {
   }
 });
 $('#clear-token-button').addEventListener('click', () => { api.clearToken(); state.authorized = false; updateAuthUI(); $('#owner-token-input').value = ''; showFormError('auth-error'); toast('تم مسح رمز الجلسة.'); });
+document.addEventListener('submit', async (event) => {
+  if (event.target.id !== 'owner-password-form') return;
+  event.preventDefault();
+  showFormError('owner-password-error');
+  const form = event.target;
+  const button = event.submitter;
+  if (button) button.disabled = true;
+  try {
+    const newPassword = form.elements.new_password.value;
+    const confirmPassword = form.elements.confirm_password.value;
+    if (newPassword !== confirmPassword) throw new Error('تأكيد كلمة السر الجديدة غير مطابق.');
+    await api.changeOwnerPassword(formObject(form));
+    api.setToken(newPassword);
+    form.reset();
+    toast('تم تغيير رمز المالك بنجاح.');
+  } catch (error) {
+    showFormError('owner-password-error', apiFailure(error));
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
 $('#task-form').addEventListener('submit', async (event) => {
   event.preventDefault(); showFormError('task-error');
   const form = event.currentTarget;
@@ -618,6 +821,11 @@ $('#global-search').addEventListener('input', () => {
 $('#mobile-menu').addEventListener('click', () => { $('#sidebar').classList.toggle('open'); $('#mobile-scrim').classList.toggle('active', $('#sidebar').classList.contains('open')); });
 $('#mobile-scrim').addEventListener('click', () => { $('#sidebar').classList.remove('open'); $('#mobile-scrim').classList.remove('active'); });
 
+installCommandBar();
+installRecorder();
+installVoiceConversation();
+installResponseActions();
+
 async function boot() {
   updateAuthUI();
   try {
@@ -631,7 +839,7 @@ async function boot() {
     $('#global-message').textContent = `تعذّر الوصول إلى API: ${apiFailure(error)}`;
   }
   if (api.hasToken) {
-    try { state.dashboard = await api.dashboard(); state.authorized = true; }
+    try { state.dashboard = await api.dashboard(); state.authorized = true; await loadServiceIntegrations(); const reports = (await api.executionReports()).reports || []; reports.slice(0, 5).reverse().forEach(renderExecutionReport); }
     catch (error) { api.clearToken(); state.authorized = false; if (error.code !== 'auth_not_configured') toast(apiFailure(error), 'error'); }
   }
   updateAuthUI();

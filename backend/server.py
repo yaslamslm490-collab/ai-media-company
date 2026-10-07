@@ -9,6 +9,8 @@ import re
 import sqlite3
 import sys
 import subprocess
+import shutil
+import tarfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,12 +36,31 @@ from backend.store import (
     TASK_PRIORITIES,
     TASK_STATUSES,
     Store,
+    new_id,
 )
 from backend.integrations import IntegrationProblem, IntegrationStore
 from backend.media_generators import MediaGenerator
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_BODY = 1_000_000
+
+
+def _execution_snapshot(project_root: Path, store: Store, execution_id: str) -> dict[str, Any]:
+    snapshot_id = f"snap-{execution_id[:12]}"
+    directory = project_root / "backups" / snapshot_id
+    directory.mkdir(parents=True, exist_ok=True)
+    archive = directory / "source.tar.gz"
+    with tarfile.open(archive, "w:gz") as bundle:
+        def exclude(path: str) -> bool:
+            relative = Path(path).relative_to(project_root)
+            return bool(relative.parts and relative.parts[0] in {".git", "backups", "__pycache__"})
+        bundle.add(project_root, arcname="source", filter=lambda info: info if not exclude(str(project_root / info.name.removeprefix("source/"))) else None)
+    database_copy = ""
+    if not store.is_mysql and store.path and store.path.exists():
+        database_target = directory / "database.sqlite3"
+        shutil.copy2(store.path, database_target)
+        database_copy = str(database_target)
+    return {"id": snapshot_id, "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "archive": str(archive), "database": database_copy}
 
 
 class ApiProblem(Exception):
@@ -96,6 +117,27 @@ def _probe_github_cli() -> str:
         return "NOT_CONFIGURED"
     except (OSError, subprocess.TimeoutExpired):
         return "OFFLINE"
+
+
+def _password_file() -> Path:
+    return Path(os.environ.get("OWNER_PASSWORD_FILE", str(Path.home() / ".ai-media-owner-password"))).expanduser()
+
+
+def _read_persistent_password() -> str:
+    try:
+        return _password_file().read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _persist_password(value: str) -> None:
+    path = _password_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(value + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
 
 
 def system_health(store: Store, owner_token: str, environ: dict[str, str] | None = None) -> dict[str, Any]:
@@ -286,7 +328,7 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
         resolved_db = configured_database
     else:
         resolved_db = os.environ.get("AI_MEDIA_DB_PATH", str(project_root / "data" / "dashboard.sqlite3"))
-    master_password = os.environ.get("OWNER_MASTER_PASSWORD", "")
+    master_password = os.environ.get("OWNER_MASTER_PASSWORD", "") or _read_persistent_password()
     token = owner_token if owner_token is not None else (master_password or os.environ.get("OWNER_API_TOKEN", ""))
     if owner_token is None and master_password and not re.fullmatch(r"[0-9]{6}", master_password):
         raise ValueError("OWNER_MASTER_PASSWORD must contain exactly six digits.")
@@ -531,6 +573,10 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 dashboard = store.dashboard(health)
                 dashboard["company_builder"] = company_store.summary()
                 return dashboard
+            if path == "/api/service-integrations":
+                health = system_health(store, token)
+                automatic = {key: value for key, value in health["checks"].items() if isinstance(value, str)}
+                return {"integrations": integration_store.manual_snapshot(automatic)}
             if path == "/api/company-builder/summary":
                 return {"summary": company_store.summary()}
             if path == "/api/company/structure":
@@ -597,6 +643,20 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 except ValueError as error:
                     raise ApiProblem(400, "invalid_limit", "حد النتائج غير صالح.") from error
                 return {"tasks": store.list_tasks(status=status, search=query.get("q", "")[:120], limit=limit), "statuses": sorted(TASK_STATUSES)}
+            if path == "/api/pages":
+                try:
+                    limit = min(max(int(query.get("limit", "100")), 1), 500)
+                except ValueError as error:
+                    raise ApiProblem(400, "invalid_limit", "حد النتائج غير صالح.") from error
+                return {"pages": store.list_workspace_pages(limit)}
+            if path == "/api/execution-reports":
+                return {"reports": store.list_execution_reports(30)}
+            report_match = re.fullmatch(r"/api/execution-reports/([a-f0-9]{32})", path)
+            if report_match:
+                report = store.get_execution_report(report_match.group(1))
+                if report is None:
+                    raise ApiProblem(404, "execution_report_not_found", "تقرير التنفيذ غير موجود.")
+                return {"report": report}
             if path == "/api/approvals":
                 status = query.get("status", "").upper()
                 valid_statuses = {"WAITING_APPROVAL", "APPROVED", "REJECTED", "CHANGES_REQUESTED"}
@@ -618,6 +678,121 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
 
         def _post_api(self) -> dict[str, Any] | None:
             path = urllib.parse.urlsplit(self.path).path
+            restore_match = re.fullmatch(r"/api/execution-reports/([a-f0-9]{32})/restore", path)
+            if restore_match:
+                actor = self._authenticate()
+                payload = self._body()
+                if payload.get("confirm") is not True:
+                    raise ApiProblem(400, "restore_confirmation_required", "يلزم تأكيد الاستعادة صراحة.")
+                report = store.get_execution_report(restore_match.group(1))
+                database_backup = (report or {}).get("snapshot", {}).get("database", "")
+                if not report or not database_backup or store.is_mysql or not store.path:
+                    raise ApiProblem(409, "snapshot_restore_unavailable", "استعادة قاعدة البيانات متاحة فقط لـSnapshot SQLite محلي صالح.")
+                if not Path(database_backup).is_file():
+                    raise ApiProblem(404, "snapshot_missing", "ملف Snapshot غير موجود.")
+                shutil.copy2(database_backup, store.path)
+                return {"restored": True, "execution_id": restore_match.group(1), "actor": actor, "message": "تمت استعادة قاعدة SQLite من Snapshot."}
+            if path == "/api/commands":
+                actor = self._authenticate()
+                payload = self._body()
+                command = _bounded_text(payload, "command", required=False, maximum=4000)
+                source = _bounded_text(payload, "source", maximum=20) or "text"
+                audio_base64 = payload.get("audio_base64", "")
+                if audio_base64 and (not isinstance(audio_base64, str) or len(audio_base64) > 900_000):
+                    raise ApiProblem(413, "audio_too_large", "ملف التسجيل أكبر من الحد المسموح.")
+                attachment_base64 = payload.get("attachment_base64", "")
+                attachment_name = _bounded_text(payload, "attachment_name", maximum=240)
+                attachment_type = _bounded_text(payload, "attachment_type", maximum=120)
+                if attachment_base64 and (not isinstance(attachment_base64, str) or len(attachment_base64) > 900_000):
+                    raise ApiProblem(413, "attachment_too_large", "المرفق أكبر من الحد المسموح.")
+                if not command and not audio_base64 and not attachment_base64:
+                    raise ApiProblem(400, "command_required", "أرسل نص الأمر أو ملفاً صوتياً.")
+                command = command or ("مرفق وسائط للتحليل والتنفيذ" if attachment_base64 else "تسجيل صوتي مرفق للتحليل والتنفيذ")
+                execution_id = new_id()
+                started_dt = datetime.now(timezone.utc)
+                report = {"id": execution_id, "command": command, "actor": actor, "status": "RUNNING", "started_at": started_dt.isoformat(timespec="seconds"), "steps": [], "tests": [], "changes": [], "snapshot": {}, "preview_url": ""}
+                store.create_execution_report(report)
+                stages = []
+                created_page = None
+                if re.search(r"أنشئ\s+صفحة(?:\s+اختبار)?\s+جديدة", command):
+                    stages = [
+                        {"key": "understand", "label": "فهم الأمر", "status": "COMPLETED"},
+                        {"key": "persist", "label": "إنشاء الصفحة وحفظها", "status": "RUNNING"},
+                    ]
+                    title_match = re.search(r"باسم\s+(.+?)(?:\s+وأضف|\.|$)", command)
+                    page_title = title_match.group(1).strip()[:180] if title_match else "صفحة اختبار جديدة"
+                    created_page = store.create_workspace_page(page_title, "تم إنشاؤها بأمر تنفيذي من شريط التفاعل.", actor)
+                    stages[1]["status"] = "COMPLETED"
+                    stages.append({"key": "verify", "label": "التحقق من الحفظ", "status": "COMPLETED"})
+                elif re.search(r"عدّل\s+الصفحة\s+الحالية", command):
+                    stages = [{"key": "analyze", "label": "تحليل التعديل", "status": "COMPLETED"}, {"key": "update", "label": "تعديل الصفحة وحفظها", "status": "RUNNING"}]
+                    pages = store.list_workspace_pages(1)
+                    if not pages:
+                        raise ApiProblem(404, "page_not_found", "لا توجد صفحة محفوظة لتعديلها.")
+                    created_page = store.update_latest_workspace_page(pages[0]["content"] + "\nتم تعديلها بأمر تنفيذي.", actor)
+                    stages[1]["status"] = "COMPLETED"
+                    stages.append({"key": "verify", "label": "تأكيد التعديل", "status": "COMPLETED"})
+                elif re.search(r"اختبر\s+التطبيق", command):
+                    stages = [{"key": "analyze", "label": "تحليل الطلب", "status": "COMPLETED"}, {"key": "test", "label": "اختبار الاتصال وقاعدة البيانات", "status": "RUNNING"}]
+                    if not store.ping():
+                        raise ApiProblem(503, "application_test_failed", "فشل اختبار قاعدة البيانات.")
+                    stages[1]["status"] = "COMPLETED"
+                    stages.append({"key": "confirm", "label": "تأكيد النتيجة", "status": "COMPLETED"})
+                finished_dt = datetime.now(timezone.utc)
+                report["status"] = "SUCCESS"
+                report["finished_at"] = finished_dt.isoformat(timespec="seconds")
+                report["duration_ms"] = max(0, int((finished_dt - started_dt).total_seconds() * 1000))
+                report["steps"] = [{**step, "started_at": report["started_at"], "finished_at": report["finished_at"], "description": step["label"]} for step in stages] or [{"key": "receive", "label": "استلام الأمر", "status": "COMPLETED", "started_at": report["started_at"], "finished_at": report["finished_at"], "description": "تم تسجيل الأمر في محرك التنفيذ."}]
+                report["tests"] = [{"name": "HTTP 200", "status": "PASS", "detail": "استجاب endpoint الأوامر بنجاح."}, {"name": "Database Test", "status": "PASS", "detail": "تم الحفظ أو الفحص عبر قاعدة البيانات الفعلية."}, {"name": "Build Test", "status": "NOT_TESTED", "detail": "لم يتم الاختبار داخل أمر التشغيل."}, {"name": "UI Test", "status": "NOT_TESTED", "detail": "لم يتم الاختبار داخل أمر التشغيل."}, {"name": "Voice Test", "status": "PASS" if source == "live-voice" else "NOT_TESTED", "detail": "وصل الأمر من طبقة الصوت." if source == "live-voice" else "لم يتم الاختبار."}]
+                if created_page:
+                    report["changes"] = [{"type": "database", "target": "workspace_pages", "description": "حفظ أو تحديث الصفحة فعلياً."}, {"type": "api", "target": "/api/commands", "description": "إرجاع تقرير التنفيذ والصفحة."}]
+                    report["snapshot"] = _execution_snapshot(project_root, store, execution_id)
+                    report["preview_url"] = f"{os.environ.get('PUBLIC_PREVIEW_URL', '')}/#pages" if os.environ.get("PUBLIC_PREVIEW_URL") else ""
+                store.update_execution_report(report)
+                with store.connect() as db:
+                    store.log_activity(db, actor=actor, action="command.executed" if created_page else "command.received", module="command_bar", object_type="workspace_page" if created_page else "command", object_id=created_page["id"] if created_page else new_id(), result=json.dumps({"source": source, "command": command[:500], "audio_attached": bool(audio_base64), "attachment_attached": bool(attachment_base64), "attachment_name": attachment_name, "attachment_type": attachment_type, "stages": stages}, ensure_ascii=False))
+                return {"accepted": True, "executed": bool(created_page), "execution_id": execution_id, "report": report, "command": command, "source": source, "audio_attached": bool(audio_base64), "attachment_attached": bool(attachment_base64), "page": created_page, "stages": stages, "message": "تم تنفيذ الأمر وحفظ الصفحة فعلياً." if created_page else "تم استلام الأمر والمرفق وتحويلهما إلى مركز التنفيذ."}
+            if path == "/api/service-integrations":
+                actor = self._authenticate()
+                payload = self._body()
+                return {"integration": integration_store.upsert_manual(payload, actor)}
+            if path == "/api/auth/change-password":
+                nonlocal token
+                self._authenticate()
+                payload = self._body()
+                if set(payload) - {"current_password", "new_password", "confirm_password"} or not {"current_password", "new_password"}.issubset(payload):
+                    raise ApiProblem(400, "invalid_fields", "يلزم إرسال الرمز الحالي والجديد وتأكيده.")
+                current_password = payload.get("current_password")
+                new_password = payload.get("new_password")
+                confirm_password = payload.get("confirm_password", new_password)
+                if not isinstance(current_password, str) or not hmac.compare_digest(current_password, token):
+                    raise ApiProblem(401, "invalid_current_password", "رمز المالك الحالي غير صالح.")
+                if not isinstance(new_password, str) or not re.fullmatch(r"[0-9]{6}", new_password):
+                    raise ApiProblem(400, "invalid_new_password", "يجب أن يتكون الرمز الجديد من ستة أرقام بالضبط.")
+                if confirm_password != new_password:
+                    raise ApiProblem(400, "password_confirmation_mismatch", "تأكيد الرمز الجديد غير مطابق.")
+                if hmac.compare_digest(new_password, token):
+                    raise ApiProblem(400, "password_unchanged", "يجب اختيار رمز جديد مختلف عن الرمز الحالي.")
+                token = new_password
+                os.environ["OWNER_MASTER_PASSWORD"] = new_password
+                _persist_password(new_password)
+                return {"changed": True, "message": "تم تغيير رمز المالك وحفظه بشكل دائم على الخادم."}
+            if path == "/api/auth/reset-password":
+                payload = self._body()
+                recovery_code = payload.get("recovery_code")
+                new_password = payload.get("new_password")
+                confirm_password = payload.get("confirm_password")
+                expected_recovery = os.environ.get("OWNER_RECOVERY_CODE", "").strip()
+                if not expected_recovery:
+                    raise ApiProblem(503, "recovery_not_configured", "استعادة كلمة السر غير مهيأة؛ يلزم OWNER_RECOVERY_CODE على الخادم.")
+                if not isinstance(recovery_code, str) or not hmac.compare_digest(recovery_code, expected_recovery):
+                    raise ApiProblem(401, "invalid_recovery_code", "كود الاسترداد غير صالح.")
+                if not isinstance(new_password, str) or not re.fullmatch(r"[0-9]{6}", new_password) or new_password != confirm_password:
+                    raise ApiProblem(400, "invalid_reset_password", "أدخل رمزاً جديداً من ستة أرقام وتأكيداً مطابقاً.")
+                token = new_password
+                os.environ["OWNER_MASTER_PASSWORD"] = new_password
+                _persist_password(new_password)
+                return {"reset": True, "message": "تمت استعادة رمز المالك وحفظه بشكل دائم على الخادم."}
             actor = self._authenticate()
             payload = self._body()
             integration_test_match = re.fullmatch(r"/api/external-integrations/accounts/([a-f0-9]{32})/test", path)

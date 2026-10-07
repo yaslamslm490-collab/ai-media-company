@@ -53,9 +53,8 @@ class Store:
     def initialize(self) -> None:
         with self.connect() as db:
             ensure_migration_table(db)
-            if migration_applied(db, "001-core-v1"):
-                return
-            db.executescript("""
+            if not migration_applied(db, "001-core-v1"):
+                db.executescript("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
@@ -141,11 +140,108 @@ class Store:
                     updated_at TEXT NOT NULL
                 );
             """)
-            record_migration(db, "001-core-v1", utc_now())
+                record_migration(db, "001-core-v1", utc_now())
+            if not migration_applied(db, "002-workspace-pages"):
+                db.execute("""CREATE TABLE IF NOT EXISTS workspace_pages (
+                    id TEXT PRIMARY KEY,
+                    slug TEXT NOT NULL UNIQUE,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'PUBLISHED',
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )""")
+                db.execute("CREATE INDEX IF NOT EXISTS workspace_pages_updated_idx ON workspace_pages(updated_at DESC)")
+                record_migration(db, "002-workspace-pages", utc_now())
+            if not migration_applied(db, "003-execution-reports"):
+                db.execute("""CREATE TABLE IF NOT EXISTS execution_reports (
+                    id TEXT PRIMARY KEY,
+                    command TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT NOT NULL DEFAULT '',
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
+                    steps_json TEXT NOT NULL DEFAULT '[]',
+                    tests_json TEXT NOT NULL DEFAULT '[]',
+                    changes_json TEXT NOT NULL DEFAULT '[]',
+                    snapshot_json TEXT NOT NULL DEFAULT '{}',
+                    preview_url TEXT NOT NULL DEFAULT ''
+                )""")
+                db.execute("CREATE INDEX IF NOT EXISTS execution_reports_started_idx ON execution_reports(started_at DESC)")
+                record_migration(db, "003-execution-reports", utc_now())
 
     def ping(self) -> bool:
         with self.connect() as db:
             return db.execute("SELECT 1").fetchone()[0] == 1
+
+    def create_workspace_page(self, title: str, content: str, actor: str) -> dict[str, Any]:
+        now = utc_now()
+        page = {"id": new_id(), "slug": f"test-{new_id()[:10]}", "title": title,
+                "content": content, "status": "PUBLISHED", "created_by": actor,
+                "created_at": now, "updated_at": now}
+        with self.connect() as db:
+            db.execute("""INSERT INTO workspace_pages
+                (id,slug,title,content,status,created_by,created_at,updated_at)
+                VALUES (:id,:slug,:title,:content,:status,:created_by,:created_at,:updated_at)""", page)
+        return page
+
+    def list_workspace_pages(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM workspace_pages ORDER BY updated_at DESC LIMIT ?", (min(max(limit, 1), 500),)).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_latest_workspace_page(self, content: str, actor: str) -> dict[str, Any] | None:
+        now = utc_now()
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM workspace_pages ORDER BY updated_at DESC LIMIT 1").fetchone()
+            if row is None:
+                return None
+            db.execute("UPDATE workspace_pages SET content=?, updated_at=? WHERE id=?", (content, now, row["id"]))
+            updated = db.execute("SELECT * FROM workspace_pages WHERE id=?", (row["id"],)).fetchone()
+        return dict(updated) if updated is not None else None
+
+    def create_execution_report(self, report: dict[str, Any]) -> dict[str, Any]:
+        record = {"id": report["id"], "command": report["command"], "actor": report["actor"],
+                  "status": report.get("status", "RUNNING"), "started_at": report["started_at"],
+                  "finished_at": report.get("finished_at", ""), "duration_ms": report.get("duration_ms", 0),
+                  "steps_json": json.dumps(report.get("steps", []), ensure_ascii=False),
+                  "tests_json": json.dumps(report.get("tests", []), ensure_ascii=False),
+                  "changes_json": json.dumps(report.get("changes", []), ensure_ascii=False),
+                  "snapshot_json": json.dumps(report.get("snapshot", {}), ensure_ascii=False),
+                  "preview_url": report.get("preview_url", "")}
+        with self.connect() as db:
+            db.execute("""INSERT INTO execution_reports
+                (id,command,actor,status,started_at,finished_at,duration_ms,steps_json,tests_json,changes_json,snapshot_json,preview_url)
+                VALUES (:id,:command,:actor,:status,:started_at,:finished_at,:duration_ms,:steps_json,:tests_json,:changes_json,:snapshot_json,:preview_url)""", record)
+        return report
+
+    def update_execution_report(self, report: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as db:
+            db.execute("""UPDATE execution_reports SET status=?,finished_at=?,duration_ms=?,steps_json=?,tests_json=?,changes_json=?,snapshot_json=?,preview_url=? WHERE id=?""",
+                       (report.get("status", "RUNNING"), report.get("finished_at", ""), report.get("duration_ms", 0),
+                        json.dumps(report.get("steps", []), ensure_ascii=False), json.dumps(report.get("tests", []), ensure_ascii=False),
+                        json.dumps(report.get("changes", []), ensure_ascii=False), json.dumps(report.get("snapshot", {}), ensure_ascii=False), report.get("preview_url", ""), report["id"]))
+        return report
+
+    @staticmethod
+    def _execution_row(row: Any) -> dict[str, Any]:
+        report = dict(row)
+        for field, fallback in (("steps_json", []), ("tests_json", []), ("changes_json", []), ("snapshot_json", {})):
+            value = report.pop(field)
+            report[field.replace("_json", "")] = json.loads(value or ("{}" if isinstance(fallback, dict) else "[]"))
+        return report
+
+    def get_execution_report(self, execution_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM execution_reports WHERE id=?", (execution_id,)).fetchone()
+        return self._execution_row(row) if row else None
+
+    def list_execution_reports(self, limit: int = 30) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM execution_reports ORDER BY started_at DESC LIMIT ?", (min(max(limit, 1), 100),)).fetchall()
+        return [self._execution_row(row) for row in rows]
 
     @staticmethod
     def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
