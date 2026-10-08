@@ -24,7 +24,6 @@ VERIFY_ATTEMPT_MAX = 5
 LOCKOUT_SECONDS = 15 * 60
 SESSION_TTL_SECONDS = 12 * 60 * 60
 _PHONE_RE = re.compile(r"^\+[1-9][0-9]{7,14}$")
-_SID_RE = re.compile(r"^AC[0-9a-fA-F]{32}$")
 _API_KEY_RE = re.compile(r"^SK[0-9a-fA-F]{32}$")
 _VERIFY_SERVICE_RE = re.compile(r"^VA[0-9a-fA-F]{32}$")
 
@@ -67,7 +66,6 @@ def sms_auth_configured(env: dict[str, str] | None = None) -> bool:
         _trusted_phones(env)
         and len(hmac_key.encode("utf-8")) >= 32
         and re.fullmatch(r"[A-Za-z0-9_-]{32,256}", recovery)
-        and _SID_RE.fullmatch(env.get("TWILIO_ACCOUNT_SID", "").strip())
         and _API_KEY_RE.fullmatch(env.get("TWILIO_API_KEY", "").strip())
         and len(env.get("TWILIO_API_SECRET", "")) >= 16
         and _VERIFY_SERVICE_RE.fullmatch(env.get("TWILIO_VERIFY_SERVICE_SID", "").strip())
@@ -83,7 +81,6 @@ def _session_digest(token: str) -> str:
 
 
 def _twilio_request(path: str, fields: dict[str, str], env: dict[str, str]) -> dict[str, Any]:
-    account_sid = env["TWILIO_ACCOUNT_SID"].strip()
     api_key = env["TWILIO_API_KEY"].strip()
     api_secret = env["TWILIO_API_SECRET"]
     service_sid = env["TWILIO_VERIFY_SERVICE_SID"].strip()

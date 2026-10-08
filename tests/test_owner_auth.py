@@ -25,7 +25,6 @@ def configured_env() -> dict[str, str]:
         "OWNER_PHONE_NUMBERS_BACKUP": json.dumps(["+44" + "7" * 10]),
         "OWNER_RECOVERY_HMAC_KEY": "h" * 48,
         "OWNER_RECOVERY_CODE": "r" * 48,
-        "TWILIO_ACCOUNT_SID": "AC" + "a" * 32,
         "TWILIO_API_KEY": "SK" + "b" * 32,
         "TWILIO_API_SECRET": "secret-value-for-tests-32-characters",
         "TWILIO_VERIFY_SERVICE_SID": "VA" + "c" * 32,

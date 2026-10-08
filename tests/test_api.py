@@ -25,7 +25,6 @@ class ApiTestCase(unittest.TestCase):
             "MANUS_HEALTH_URL": "", "MANUS_API_TOKEN": "", "MANUS_API_KEY": "",
             "GITHUB_HEALTH_URL": "", "GITHUB_TOKEN": "", "GITHUB_USE_CLI": "", "EXTERNAL_HEALTH_URLS": "",
             "OWNER_PHONE_NUMBER_PRIMARY": "", "OWNER_PHONE_NUMBERS_BACKUP": "", "OWNER_RECOVERY_HMAC_KEY": "",
-            "OWNER_RECOVERY_CODE": "", "TWILIO_ACCOUNT_SID": "", "TWILIO_API_KEY": "",
             "TWILIO_API_SECRET": "", "TWILIO_VERIFY_SERVICE_SID": "",
         })
         self.env_patch.start()
