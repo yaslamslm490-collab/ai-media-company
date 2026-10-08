@@ -24,6 +24,9 @@ class ApiTestCase(unittest.TestCase):
             "AI_ROUTER_HEALTH_URL": "", "AI_ROUTER_API_KEY": "", "OPENAI_API_BASE": "", "OPENAI_API_KEY": "",
             "MANUS_HEALTH_URL": "", "MANUS_API_TOKEN": "", "MANUS_API_KEY": "",
             "GITHUB_HEALTH_URL": "", "GITHUB_TOKEN": "", "GITHUB_USE_CLI": "", "EXTERNAL_HEALTH_URLS": "",
+            "OWNER_PHONE_NUMBER_PRIMARY": "", "OWNER_PHONE_NUMBERS_BACKUP": "", "OWNER_RECOVERY_HMAC_KEY": "",
+            "OWNER_RECOVERY_CODE": "", "TWILIO_ACCOUNT_SID": "", "TWILIO_API_KEY": "",
+            "TWILIO_API_SECRET": "", "TWILIO_VERIFY_SERVICE_SID": "",
         })
         self.env_patch.start()
         self.token = "test-token-for-owner-access-32-chars"
@@ -269,47 +272,48 @@ class ApiTestCase(unittest.TestCase):
 
 
 class AuthNotConfiguredTest(unittest.TestCase):
-    def test_owner_master_password_accepts_six_digits_from_environment(self):
-        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"OWNER_MASTER_PASSWORD": "123456", "OWNER_API_TOKEN": ""}):
+    def _request_status(self, server, path, token=None):
+        headers = {"Accept": "application/json"}
+        if token:
+            headers["X-Owner-Token"] = token
+        request = Request(f"http://127.0.0.1:{server.server_port}{path}", headers=headers)
+        try:
+            with urlopen(request, timeout=3) as response:
+                return response.status, json.loads(response.read())
+        except HTTPError as error:
+            return error.code, json.loads(error.read())
+
+    def test_legacy_password_environment_is_ignored_and_cannot_authenticate(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(
+            os.environ, {"OWNER_MASTER_PASSWORD": "123456", "OWNER_API_TOKEN": "legacy-token"}, clear=True
+        ):
             server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3"))
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                request = Request(f"http://127.0.0.1:{server.server_port}/api/dashboard", headers={"X-Owner-Token": "123456"})
-                with urlopen(request, timeout=3) as response:
-                    self.assertEqual(response.status, 200)
+                health_status, health = self._request_status(server, "/api/health")
+                status, payload = self._request_status(server, "/api/dashboard", token="123456")
+                self.assertEqual(health_status, 200)
+                self.assertEqual(health["checks"]["authentication"], "NOT_CONFIGURED")
+                self.assertEqual(status, 503)
+                self.assertEqual(payload["error"]["code"], "auth_not_configured")
             finally:
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=3)
 
-    def test_owner_secret_rejects_fewer_than_six_characters(self):
-        with tempfile.TemporaryDirectory() as temp:
-            with self.assertRaisesRegex(ValueError, "at least 6 characters"):
-                make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3", owner_token="12345")
-
-    def test_owner_master_password_requires_exactly_six_digits(self):
-        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"OWNER_MASTER_PASSWORD": "abc123", "OWNER_API_TOKEN": ""}):
-            with self.assertRaisesRegex(ValueError, "exactly six digits"):
-                make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3")
-
-    def test_private_api_fails_closed_when_no_owner_token_exists(self):
+    def test_private_api_fails_closed_when_sms_and_recovery_secrets_are_missing(self):
         with patch.dict(os.environ, {}, clear=True), tempfile.TemporaryDirectory() as temp:
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3", owner_token=""))
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3"))
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
-            base = f"http://127.0.0.1:{server.server_port}"
             try:
-                with urlopen(base + "/api/health", timeout=3) as response:
-                    health = json.loads(response.read())
+                _, health = self._request_status(server, "/api/health")
+                status, payload = self._request_status(server, "/api/dashboard", token="not-a-session")
                 self.assertEqual(health["checks"]["authentication"], "NOT_CONFIGURED")
                 self.assertEqual(health["overall"], "NOT_CONFIGURED")
-                request = Request(base + "/api/dashboard", headers={"X-Owner-Token": "anything"})
-                with self.assertRaises(HTTPError) as raised:
-                    urlopen(request, timeout=3)
-                self.assertEqual(raised.exception.code, 503)
-                body = json.loads(raised.exception.read())
-                self.assertEqual(body["error"]["code"], "auth_not_configured")
+                self.assertEqual(status, 503)
+                self.assertEqual(payload["error"]["code"], "auth_not_configured")
             finally:
                 server.shutdown()
                 server.server_close()
