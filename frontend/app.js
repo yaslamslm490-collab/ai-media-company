@@ -2,7 +2,7 @@ import {api, ApiError} from './api.js';
 import {formatDate, label, statusClass} from './status.js';
 import {handleCompanyClick, handleCompanySubmit, isCompanyBuilderRoute, isEmployeeRoute, renderCompanyPage} from './company-builder.js';
 import {renderAccountResults, renderAccountSearch} from './account-browser.js';
-import {VoiceEngine} from './voice-engine.js';
+import {SpeechReader, VoiceEngine} from './voice-engine.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -300,6 +300,7 @@ let recorder = null;
 let recordedChunks = [];
 let inlineAttachment = null;
 let voiceEngine = null;
+let speechReader = null;
 function setVoiceState(stateName) {
   const labels = {ready: '🔵 جاهز', listening: '🎙️ يستمع', processing: '🧠 يعالج', speaking: '🔊 يتحدث'};
   const node = $('#voice-status'); if (node) { node.textContent = labels[stateName] || labels.ready; node.className = `voice-status ${stateName}`; }
@@ -324,6 +325,27 @@ function installVoiceConversation() {
   });
   $('#voice-mute').addEventListener('click', () => { voiceEngine.mute(); toast('تم كتم الرد الصوتي؛ سيستمر الاستماع.'); });
   setVoiceState('ready');
+}
+function setReaderState(stateName) {
+  const labels = {ready: 'جاهز', playing: 'يقرأ بالعربية', paused: 'متوقف مؤقتاً'};
+  setCommandMeta('reader-status', labels[stateName] || labels.ready);
+  const pause = $('#command-pause'); const resume = $('#command-resume'); const stop = $('#command-stop');
+  if (pause) pause.hidden = stateName !== 'playing';
+  if (resume) resume.hidden = stateName !== 'paused';
+  if (stop) stop.hidden = stateName === 'ready';
+  const play = $('#command-speak');
+  if (play) play.classList.toggle('reader-active', stateName === 'playing' || stateName === 'paused');
+}
+function installSpeechReader() {
+  speechReader = new SpeechReader({onState: setReaderState, onError: (message) => toast(message, 'error')});
+  $('#command-speak').addEventListener('click', () => {
+    try { speechReader.speak(commandValue()); toast('بدأت القراءة الصوتية العربية.'); }
+    catch (error) { toast(error.message || 'تعذر بدء القراءة الصوتية.', 'error'); }
+  });
+  $('#command-pause').addEventListener('click', () => speechReader.pause());
+  $('#command-resume').addEventListener('click', () => speechReader.resume());
+  $('#command-stop').addEventListener('click', () => speechReader.stop());
+  setReaderState('ready');
 }
 function commandValue() { return $('#command-input')?.value.trim() || ''; }
 function setCommandMeta(id, text) { const node = $(`#${id}`); if (node) node.textContent = text; }
@@ -824,6 +846,7 @@ $('#mobile-scrim').addEventListener('click', () => { $('#sidebar').classList.rem
 installCommandBar();
 installRecorder();
 installVoiceConversation();
+installSpeechReader();
 installResponseActions();
 
 async function boot() {

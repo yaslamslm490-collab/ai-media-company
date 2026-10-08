@@ -75,10 +75,14 @@
         <button class="icon-button tiny voice-live-toggle" id="voice-live-toggle" type="button" title="بدء المحادثة الصوتية الحرة" aria-label="بدء المحادثة الصوتية الحرة">🎙️💬</button>
         <button class="icon-button tiny command-record" id="command-record" type="button" title="بدء أو إيقاف التسجيل الاحتياطي" aria-label="بدء أو إيقاف التسجيل الاحتياطي">●</button>
         <button class="icon-button tiny voice-mute" id="voice-mute" type="button" title="كتم الرد الصوتي" aria-label="كتم الرد الصوتي" hidden>🔇</button>
+        <button class="button button-primary reader-control" id="command-speak" type="button" title="تشغيل قراءة النص بالعربية" aria-label="تشغيل قراءة النص بالعربية">▶</button>
+        <button class="icon-button tiny reader-control" id="command-pause" type="button" title="إيقاف القراءة مؤقتاً" aria-label="إيقاف القراءة مؤقتاً" hidden>⏸</button>
+        <button class="icon-button tiny reader-control" id="command-resume" type="button" title="استكمال القراءة" aria-label="استكمال القراءة" hidden>▶</button>
+        <button class="icon-button tiny reader-control" id="command-stop" type="button" title="إيقاف القراءة بالكامل" aria-label="إيقاف القراءة بالكامل" hidden>■</button>
         <button class="button button-primary command-send" id="command-send" type="button" title="إرسال الأمر" aria-label="إرسال الأمر">➤</button>
       </div>
     </div>
-    <div class="inline-command-meta"><span id="command-attachment-name">لا توجد مرفقات</span><span id="command-execution-state">جاهز للتنفيذ</span><span id="voice-status" class="voice-status ready">🔵 جاهز</span><span id="command-recording-state">جاهز</span><span id="voice-waveform" class="voice-waveform" hidden><i></i><i></i><i></i><i></i><i></i></span></div>
+    <div class="inline-command-meta"><span id="command-attachment-name">لا توجد مرفقات</span><span id="command-execution-state">جاهز للتنفيذ</span><span id="voice-status" class="voice-status ready">🔵 جاهز</span><span id="command-recording-state">جاهز</span><span id="reader-status">جاهز</span><span id="voice-waveform" class="voice-waveform" hidden><i></i><i></i><i></i><i></i><i></i></span></div>
   </section>
 
   <div class="overlay" id="auth-overlay" hidden>

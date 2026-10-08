@@ -1,3 +1,74 @@
+function pickArabicVoice(voices = []) {
+  const arabic = voices.filter((voice) => /^ar(?:-|_|$)/i.test(voice.lang || ''));
+  if (!arabic.length) return null;
+  const preferred = arabic.find((voice) => /^ar-SA/i.test(voice.lang))
+    || arabic.find((voice) => /^ar-AE/i.test(voice.lang))
+    || arabic.find((voice) => voice.default)
+    || arabic[0];
+  return preferred;
+}
+
+export class SpeechReader {
+  constructor({onState, onError} = {}) {
+    this.onState = onState || (() => {});
+    this.onError = onError || (() => {});
+    this.utterance = null;
+    this.state = 'ready';
+    this.voice = null;
+    this.refreshVoices = this.refreshVoices.bind(this);
+    if (this.supported()) {
+      this.refreshVoices();
+      window.speechSynthesis.addEventListener('voiceschanged', this.refreshVoices);
+    }
+  }
+  supported() { return typeof window !== 'undefined' && 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window; }
+  refreshVoices() { this.voice = pickArabicVoice(window.speechSynthesis.getVoices()); }
+  setState(next) { this.state = next; this.onState(next); }
+  speak(text) {
+    if (!this.supported()) throw new Error('القراءة الصوتية غير مدعومة في هذا المتصفح أو الجهاز.');
+    const value = String(text || '').trim();
+    if (!value) throw new Error('اكتب نصاً في مربع الكتابة أولاً.');
+    this.stop(false);
+    this.refreshVoices();
+    const utterance = new SpeechSynthesisUtterance(value.slice(0, 6000));
+    utterance.lang = 'ar-SA';
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    if (this.voice) utterance.voice = this.voice;
+    utterance.onstart = () => this.setState('playing');
+    utterance.onpause = () => this.setState('paused');
+    utterance.onresume = () => this.setState('playing');
+    utterance.onend = () => { this.utterance = null; this.setState('ready'); };
+    utterance.onerror = (event) => {
+      this.utterance = null;
+      if (event.error !== 'canceled' && event.error !== 'interrupted') this.onError('تعذر تشغيل القراءة الصوتية العربية.');
+      this.setState('ready');
+    };
+    this.utterance = utterance;
+    this.setState('playing');
+    window.speechSynthesis.speak(utterance);
+  }
+  pause() {
+    if (!this.supported() || !window.speechSynthesis.speaking) return;
+    window.speechSynthesis.pause();
+    this.setState('paused');
+  }
+  resume() {
+    if (!this.supported() || !window.speechSynthesis.paused) return;
+    window.speechSynthesis.resume();
+    this.setState('playing');
+  }
+  stop(updateState = true) {
+    if (this.supported()) window.speechSynthesis.cancel();
+    this.utterance = null;
+    if (updateState) this.setState('ready');
+  }
+  destroy() {
+    this.stop();
+    if (this.supported()) window.speechSynthesis.removeEventListener('voiceschanged', this.refreshVoices);
+  }
+}
+
 export class VoiceEngine {
   constructor({onState, onTranscript, onError} = {}) {
     this.onState = onState || (() => {});
@@ -54,10 +125,7 @@ export class VoiceEngine {
     if (!this.running || this.processing || this.speaking || !this.recognition) return;
     try { this.onState('listening'); this.recognition.start(); } catch (error) { if (error.name !== 'InvalidStateError') this.onError('تعذر بدء الاستماع؛ ستتم إعادة المحاولة بأمان.'); }
   }
-  scheduleListen() {
-    clearTimeout(this.restartTimer);
-    this.restartTimer = setTimeout(() => this.listen(), 350);
-  }
+  scheduleListen() { clearTimeout(this.restartTimer); this.restartTimer = setTimeout(() => this.listen(), 350); }
   completeProcessing() { this.processing = false; if (this.running && !this.speaking) this.scheduleListen(); }
   speak(text) {
     if (!this.running || this.muted || !text || !window.speechSynthesis) { this.completeProcessing(); return; }
