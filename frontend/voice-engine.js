@@ -1,11 +1,68 @@
-function pickArabicVoice(voices = []) {
-  const arabic = voices.filter((voice) => /^ar(?:-|_|$)/i.test(voice.lang || ''));
+const ARABIC_LANGUAGE = /^ar(?:[-_].+)?$/i;
+const PREFERRED_ARABIC_LOCALES = [
+  'ar-SA', 'ar-EG', 'ar-AE', 'ar-MA', 'ar-TN', 'ar-DZ', 'ar-LY', 'ar-IQ',
+  'ar-KW', 'ar-QA', 'ar-BH', 'ar-OM', 'ar-YE', 'ar-JO', 'ar-LB', 'ar-SY', 'ar',
+];
+const SPEECH_CHUNK_LENGTH = 220;
+
+function normalizedLocale(value = '') {
+  return String(value).replace('_', '-');
+}
+
+export function pickArabicVoice(voices = []) {
+  const arabic = voices.filter((voice) => ARABIC_LANGUAGE.test(voice.lang || ''));
   if (!arabic.length) return null;
-  const preferred = arabic.find((voice) => /^ar-SA/i.test(voice.lang))
-    || arabic.find((voice) => /^ar-AE/i.test(voice.lang))
-    || arabic.find((voice) => voice.default)
-    || arabic[0];
-  return preferred;
+  return arabic
+    .map((voice, index) => {
+      const locale = normalizedLocale(voice.lang);
+      const preferredIndex = PREFERRED_ARABIC_LOCALES.findIndex((item) => item.toLowerCase() === locale.toLowerCase());
+      const languageMatch = preferredIndex >= 0 ? 1000 - preferredIndex * 20 : 400;
+      const localBonus = voice.localService ? 12 : 0;
+      const defaultBonus = voice.default ? 6 : 0;
+      return {voice, score: languageMatch + localBonus + defaultBonus - index / 100};
+    })
+    .sort((left, right) => right.score - left.score)[0].voice;
+}
+
+function splitSpeechText(text, maxLength = SPEECH_CHUNK_LENGTH) {
+  const value = String(text || '').trim();
+  if (!value) return [];
+  const sentences = value.match(/[^.!?؟؛،\n]+[.!?؟؛،]?|\n+/g) || [value];
+  const chunks = [];
+  let current = '';
+  const pushCurrent = () => {
+    const chunk = current.trim();
+    if (chunk) chunks.push(chunk);
+    current = '';
+  };
+  const appendWords = (sentence) => {
+    sentence.split(/\s+/).forEach((word) => {
+      if (!word) return;
+      const candidate = current ? `${current} ${word}` : word;
+      if (candidate.length > maxLength && current) pushCurrent();
+      if (word.length > maxLength) {
+        for (let index = 0; index < word.length; index += maxLength) {
+          const part = word.slice(index, index + maxLength);
+          if (part.length === maxLength) chunks.push(part);
+          else current = part;
+        }
+      } else {
+        current = current ? `${current} ${word}` : word;
+      }
+    });
+  };
+  sentences.forEach((sentence) => {
+    const clean = sentence.trim();
+    if (!clean) return pushCurrent();
+    if ((current ? `${current} ${clean}` : clean).length <= maxLength) {
+      current = current ? `${current} ${clean}` : clean;
+    } else {
+      pushCurrent();
+      appendWords(clean);
+    }
+  });
+  pushCurrent();
+  return chunks;
 }
 
 export class SpeechReader {
@@ -15,57 +72,128 @@ export class SpeechReader {
     this.utterance = null;
     this.state = 'ready';
     this.voice = null;
+    this.chunks = [];
+    this.chunkIndex = 0;
+    this.runId = 0;
+    this.paused = false;
     this.refreshVoices = this.refreshVoices.bind(this);
     if (this.supported()) {
       this.refreshVoices();
-      window.speechSynthesis.addEventListener('voiceschanged', this.refreshVoices);
+      window.speechSynthesis.addEventListener?.('voiceschanged', this.refreshVoices);
+      if ('onvoiceschanged' in window.speechSynthesis && !window.speechSynthesis.addEventListener) {
+        window.speechSynthesis.onvoiceschanged = this.refreshVoices;
+      }
     }
   }
-  supported() { return typeof window !== 'undefined' && 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window; }
-  refreshVoices() { this.voice = pickArabicVoice(window.speechSynthesis.getVoices()); }
-  setState(next) { this.state = next; this.onState(next); }
+
+  supported() {
+    return typeof window !== 'undefined'
+      && 'speechSynthesis' in window
+      && 'SpeechSynthesisUtterance' in window;
+  }
+
+  refreshVoices() {
+    if (this.supported()) this.voice = pickArabicVoice(window.speechSynthesis.getVoices());
+    return this.voice;
+  }
+
+  setState(next) {
+    this.state = next;
+    this.onState(next);
+  }
+
   speak(text) {
     if (!this.supported()) throw new Error('القراءة الصوتية غير مدعومة في هذا المتصفح أو الجهاز.');
     const value = String(text || '').trim();
     if (!value) throw new Error('اكتب نصاً في مربع الكتابة أولاً.');
     this.stop(false);
     this.refreshVoices();
-    const utterance = new SpeechSynthesisUtterance(value.slice(0, 6000));
-    utterance.lang = 'ar-SA';
+    this.chunks = splitSpeechText(value);
+    this.chunkIndex = 0;
+    this.paused = false;
+    const runId = ++this.runId;
+    this.setState('playing');
+    this.speakNext(runId);
+  }
+
+  speakNext(runId) {
+    if (this.paused) return;
+    if (runId !== this.runId || !this.chunks.length || this.chunkIndex >= this.chunks.length) {
+      if (runId === this.runId) this.finish();
+      return;
+    }
+    const utterance = new SpeechSynthesisUtterance(this.chunks[this.chunkIndex]);
+    utterance.lang = this.voice?.lang || 'ar-SA';
     utterance.rate = 1;
     utterance.pitch = 1;
     if (this.voice) utterance.voice = this.voice;
-    utterance.onstart = () => this.setState('playing');
-    utterance.onpause = () => this.setState('paused');
-    utterance.onresume = () => this.setState('playing');
-    utterance.onend = () => { this.utterance = null; this.setState('ready'); };
-    utterance.onerror = (event) => {
-      this.utterance = null;
-      if (event.error !== 'canceled' && event.error !== 'interrupted') this.onError('تعذر تشغيل القراءة الصوتية العربية.');
-      this.setState('ready');
-    };
     this.utterance = utterance;
-    this.setState('playing');
+    utterance.onstart = () => {
+      if (runId === this.runId) this.setState('playing');
+    };
+    utterance.onpause = () => {
+      if (runId === this.runId) this.setState('paused');
+    };
+    utterance.onresume = () => {
+      if (runId === this.runId) this.setState('playing');
+    };
+    utterance.onend = () => {
+      if (runId !== this.runId) return;
+      this.utterance = null;
+      this.chunkIndex += 1;
+      if (this.chunkIndex < this.chunks.length) {
+        window.setTimeout(() => this.speakNext(runId), 0);
+      } else {
+        this.finish();
+      }
+    };
+    utterance.onerror = (event) => {
+      if (runId !== this.runId) return;
+      this.utterance = null;
+      if (event.error !== 'canceled' && event.error !== 'interrupted') {
+        this.onError('تعذر تشغيل القراءة الصوتية العربية.');
+      }
+      this.finish();
+    };
     window.speechSynthesis.speak(utterance);
   }
+
+  finish() {
+    this.utterance = null;
+    this.chunks = [];
+    this.chunkIndex = 0;
+    this.paused = false;
+    this.setState('ready');
+  }
+
   pause() {
-    if (!this.supported() || !window.speechSynthesis.speaking) return;
+    if (!this.supported() || this.state !== 'playing') return;
+    this.paused = true;
     window.speechSynthesis.pause();
     this.setState('paused');
   }
+
   resume() {
-    if (!this.supported() || !window.speechSynthesis.paused) return;
+    if (!this.supported() || this.state !== 'paused') return;
+    this.paused = false;
     window.speechSynthesis.resume();
+    if (!this.utterance) this.speakNext(this.runId);
     this.setState('playing');
   }
+
   stop(updateState = true) {
+    this.runId += 1;
     if (this.supported()) window.speechSynthesis.cancel();
     this.utterance = null;
+    this.chunks = [];
+    this.chunkIndex = 0;
+    this.paused = false;
     if (updateState) this.setState('ready');
   }
+
   destroy() {
     this.stop();
-    if (this.supported()) window.speechSynthesis.removeEventListener('voiceschanged', this.refreshVoices);
+    if (this.supported()) window.speechSynthesis.removeEventListener?.('voiceschanged', this.refreshVoices);
   }
 }
 
