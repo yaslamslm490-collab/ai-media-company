@@ -171,6 +171,33 @@ class Store:
                 )""")
                 db.execute("CREATE INDEX IF NOT EXISTS execution_reports_started_idx ON execution_reports(started_at DESC)")
                 record_migration(db, "003-execution-reports", utc_now())
+            if not migration_applied(db, "004-owner-sms-otp"):
+                db.execute("""CREATE TABLE IF NOT EXISTS owner_auth_state (
+                    id VARCHAR(16) PRIMARY KEY,
+                    target_id VARCHAR(64) NOT NULL DEFAULT '',
+                    expires_at INTEGER NOT NULL DEFAULT 0,
+                    resend_after INTEGER NOT NULL DEFAULT 0,
+                    send_window_started INTEGER NOT NULL DEFAULT 0,
+                    send_count INTEGER NOT NULL DEFAULT 0,
+                    send_day_started INTEGER NOT NULL DEFAULT 0,
+                    send_day_count INTEGER NOT NULL DEFAULT 0,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    locked_until INTEGER NOT NULL DEFAULT 0,
+                    recovery_code_hash VARCHAR(64) NOT NULL DEFAULT '',
+                    recovery_fingerprint VARCHAR(64) NOT NULL DEFAULT '',
+                    recovery_used_at INTEGER NOT NULL DEFAULT 0,
+                    recovery_attempt_count INTEGER NOT NULL DEFAULT 0
+                )""")
+                db.execute("""CREATE TABLE IF NOT EXISTS owner_sessions (
+                    token_hash VARCHAR(64) PRIMARY KEY,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL
+                )""")
+                db.execute("CREATE INDEX IF NOT EXISTS owner_sessions_expiry_idx ON owner_sessions(expires_at)")
+                db.execute("""INSERT OR IGNORE INTO owner_auth_state
+                    (id,target_id,expires_at,resend_after,send_window_started,send_count,send_day_started,send_day_count,attempt_count,locked_until,recovery_code_hash,recovery_fingerprint,recovery_used_at,recovery_attempt_count)
+                    VALUES ('owner','',0,0,0,0,0,0,0,0,'','',0,0)""")
+                record_migration(db, "004-owner-sms-otp", utc_now())
 
     def ping(self) -> bool:
         with self.connect() as db:

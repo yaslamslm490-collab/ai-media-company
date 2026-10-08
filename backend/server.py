@@ -17,7 +17,7 @@ import urllib.request
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from backend.modules import BUILDER_CAPABILITIES, MODULES
 from backend.database import IntegrityError as MySQLIntegrityError, is_mysql_url
@@ -40,6 +40,7 @@ from backend.store import (
 )
 from backend.integrations import IntegrationProblem, IntegrationStore
 from backend.media_generators import MediaGenerator
+from backend.owner_auth import OwnerAuthError, OwnerSmsAuth, sms_auth_configured
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_BODY = 1_000_000
@@ -117,27 +118,6 @@ def _probe_github_cli() -> str:
         return "NOT_CONFIGURED"
     except (OSError, subprocess.TimeoutExpired):
         return "OFFLINE"
-
-
-def _password_file() -> Path:
-    return Path(os.environ.get("OWNER_PASSWORD_FILE", str(Path.home() / ".ai-media-owner-password"))).expanduser()
-
-
-def _read_persistent_password() -> str:
-    try:
-        return _password_file().read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-
-
-def _persist_password(value: str) -> None:
-    path = _password_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(value + "\n", encoding="utf-8")
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
 
 
 def system_health(store: Store, owner_token: str, environ: dict[str, str] | None = None) -> dict[str, Any]:
@@ -316,7 +296,9 @@ def _employee_ai_response(employee: dict[str, Any], message: str, company_store:
     return {"response": content[:12000], "model": primary}
 
 
-def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_token: str | None = None):
+def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_token: str | None = None,
+                 sms_sender: Callable[[str], None] | None = None,
+                 sms_checker: Callable[[str, str], bool] | None = None):
     project_root = Path(root).resolve()
     configured_static = os.environ.get("AI_MEDIA_STATIC_ROOT", "").strip()
     built_static = project_root / "dist"
@@ -328,14 +310,12 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
         resolved_db = configured_database
     else:
         resolved_db = os.environ.get("AI_MEDIA_DB_PATH", str(project_root / "data" / "dashboard.sqlite3"))
-    master_password = os.environ.get("OWNER_MASTER_PASSWORD", "") or _read_persistent_password()
-    token = owner_token if owner_token is not None else (master_password or os.environ.get("OWNER_API_TOKEN", ""))
-    if owner_token is None and master_password and not re.fullmatch(r"[0-9]{6}", master_password):
-        raise ValueError("OWNER_MASTER_PASSWORD must contain exactly six digits.")
-    if token and len(token) < 6:
-        raise ValueError("OWNER_MASTER_PASSWORD or OWNER_API_TOKEN must be at least 6 characters.")
+    # Explicit owner_token injection exists only for tests. Production uses OTP sessions.
+    test_owner_token = owner_token
     store = Store(resolved_db)
     store.initialize()
+    owner_auth = OwnerSmsAuth(store, sender=sms_sender, checker=sms_checker)
+    health_token = test_owner_token or ("sms-configured" if owner_auth.configured else "")
     company_store = CompanyBuilderStore(store)
     company_store.initialize()
     integration_store = IntegrationStore(store)
@@ -377,12 +357,16 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             return payload
 
         def _authenticate(self) -> str:
-            if not token:
-                raise ApiProblem(503, "auth_not_configured", "المصادقة غير مهيأة. اضبط OWNER_MASTER_PASSWORD أو OWNER_API_TOKEN على الخادم أولاً.")
             supplied = self.headers.get("X-Owner-Token", "")
             if not supplied:
                 raise ApiProblem(401, "authentication_required", "يلزم رمز دخول المالك للوصول إلى بيانات مساحة العمل.")
-            if not hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8")):
+            if test_owner_token is not None:
+                valid = hmac.compare_digest(supplied.encode("utf-8"), test_owner_token.encode("utf-8"))
+            else:
+                if not owner_auth.configured:
+                    raise ApiProblem(503, "auth_not_configured", "دخول SMS غير مهيأ على الخادم.")
+                valid = owner_auth.authenticate(supplied)
+            if not valid:
                 raise ApiProblem(401, "invalid_token", "رمز دخول المالك غير صالح.")
             return "owner"
 
@@ -402,6 +386,8 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                     self._send_json(200, result)
             except ApiProblem as problem:
                 self._log_failure(problem.code, problem.message)
+                self._send_json(problem.status, {"error": {"code": problem.code, "message": problem.message}})
+            except OwnerAuthError as problem:
                 self._send_json(problem.status, {"error": {"code": problem.code, "message": problem.message}})
             except IntegrationProblem as problem:
                 self._log_failure(problem.code, problem.message)
@@ -445,7 +431,13 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
 
         def _log_failure(self, code: str, message: str) -> None:
             supplied = self.headers.get("X-Owner-Token", "")
-            if not token or not supplied or not hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8")):
+            if not supplied:
+                return
+            if test_owner_token is not None:
+                authorized = hmac.compare_digest(supplied.encode("utf-8"), test_owner_token.encode("utf-8"))
+            else:
+                authorized = owner_auth.authenticate(supplied)
+            if not authorized:
                 return
             path = urllib.parse.urlsplit(self.path).path
             pieces = path.strip("/").split("/")
@@ -563,18 +555,20 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
         def _get_api(self) -> dict[str, Any]:
             path = urllib.parse.urlsplit(self.path).path
             if path == "/api/health":
-                return system_health(store, token)
+                return system_health(store, health_token)
             if path == "/api/modules":
-                return {"modules": module_catalog(store, token), "builder_capabilities": BUILDER_CAPABILITIES}
+                return {"modules": module_catalog(store, health_token), "builder_capabilities": BUILDER_CAPABILITIES}
+            if path == "/api/auth/otp/targets":
+                return {"targets": owner_auth.targets()}
             self._authenticate()
             query = self._query()
             if path == "/api/dashboard":
-                health = system_health(store, token)
+                health = system_health(store, health_token)
                 dashboard = store.dashboard(health)
                 dashboard["company_builder"] = company_store.summary()
                 return dashboard
             if path == "/api/service-integrations":
-                health = system_health(store, token)
+                health = system_health(store, health_token)
                 automatic = {key: value for key, value in health["checks"].items() if isinstance(value, str)}
                 return {"integrations": integration_store.manual_snapshot(automatic)}
             if path == "/api/company-builder/summary":
@@ -678,6 +672,25 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
 
         def _post_api(self) -> dict[str, Any] | None:
             path = urllib.parse.urlsplit(self.path).path
+            if path == "/api/auth/otp/request":
+                payload = self._body()
+                if set(payload) != {"target_id"}:
+                    raise OwnerAuthError(400, "invalid_otp_input", "اختر رقماً موثوقاً فقط.")
+                return owner_auth.request_code(payload.get("target_id"))
+            if path == "/api/auth/otp/verify":
+                payload = self._body()
+                if set(payload) != {"target_id", "code"}:
+                    raise OwnerAuthError(400, "invalid_otp_input", "اختر رقماً موثوقاً وأدخل رمز التحقق.")
+                return owner_auth.verify_code(payload.get("target_id"), payload.get("code"))
+            if path == "/api/auth/recovery/verify":
+                payload = self._body()
+                if set(payload) != {"recovery_code"}:
+                    raise OwnerAuthError(400, "invalid_recovery_input", "أدخل رمز الاسترداد فقط.")
+                return owner_auth.verify_recovery_code(payload.get("recovery_code"))
+            if path == "/api/auth/logout":
+                self._authenticate()
+                owner_auth.revoke(self.headers.get("X-Owner-Token", ""))
+                return {"logged_out": True}
             restore_match = re.fullmatch(r"/api/execution-reports/([a-f0-9]{32})/restore", path)
             if restore_match:
                 actor = self._authenticate()
@@ -756,43 +769,6 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 actor = self._authenticate()
                 payload = self._body()
                 return {"integration": integration_store.upsert_manual(payload, actor)}
-            if path == "/api/auth/change-password":
-                nonlocal token
-                self._authenticate()
-                payload = self._body()
-                if set(payload) - {"current_password", "new_password", "confirm_password"} or not {"current_password", "new_password"}.issubset(payload):
-                    raise ApiProblem(400, "invalid_fields", "يلزم إرسال الرمز الحالي والجديد وتأكيده.")
-                current_password = payload.get("current_password")
-                new_password = payload.get("new_password")
-                confirm_password = payload.get("confirm_password", new_password)
-                if not isinstance(current_password, str) or not hmac.compare_digest(current_password, token):
-                    raise ApiProblem(401, "invalid_current_password", "رمز المالك الحالي غير صالح.")
-                if not isinstance(new_password, str) or not re.fullmatch(r"[0-9]{6}", new_password):
-                    raise ApiProblem(400, "invalid_new_password", "يجب أن يتكون الرمز الجديد من ستة أرقام بالضبط.")
-                if confirm_password != new_password:
-                    raise ApiProblem(400, "password_confirmation_mismatch", "تأكيد الرمز الجديد غير مطابق.")
-                if hmac.compare_digest(new_password, token):
-                    raise ApiProblem(400, "password_unchanged", "يجب اختيار رمز جديد مختلف عن الرمز الحالي.")
-                token = new_password
-                os.environ["OWNER_MASTER_PASSWORD"] = new_password
-                _persist_password(new_password)
-                return {"changed": True, "message": "تم تغيير رمز المالك وحفظه بشكل دائم على الخادم."}
-            if path == "/api/auth/reset-password":
-                payload = self._body()
-                recovery_code = payload.get("recovery_code")
-                new_password = payload.get("new_password")
-                confirm_password = payload.get("confirm_password")
-                expected_recovery = os.environ.get("OWNER_RECOVERY_CODE", "").strip()
-                if not expected_recovery:
-                    raise ApiProblem(503, "recovery_not_configured", "استعادة كلمة السر غير مهيأة؛ يلزم OWNER_RECOVERY_CODE على الخادم.")
-                if not isinstance(recovery_code, str) or not hmac.compare_digest(recovery_code, expected_recovery):
-                    raise ApiProblem(401, "invalid_recovery_code", "كود الاسترداد غير صالح.")
-                if not isinstance(new_password, str) or not re.fullmatch(r"[0-9]{6}", new_password) or new_password != confirm_password:
-                    raise ApiProblem(400, "invalid_reset_password", "أدخل رمزاً جديداً من ستة أرقام وتأكيداً مطابقاً.")
-                token = new_password
-                os.environ["OWNER_MASTER_PASSWORD"] = new_password
-                _persist_password(new_password)
-                return {"reset": True, "message": "تمت استعادة رمز المالك وحفظه بشكل دائم على الخادم."}
             actor = self._authenticate()
             payload = self._body()
             integration_test_match = re.fullmatch(r"/api/external-integrations/accounts/([a-f0-9]{32})/test", path)
@@ -1113,8 +1089,7 @@ def main() -> None:
     handler = make_handler()
     server = ThreadingHTTPServer((bind, port), handler)
     print(f"AI Media OS listening at http://{bind}:{port}")
-    owner_password = os.environ.get("OWNER_MASTER_PASSWORD", "") or os.environ.get("OWNER_API_TOKEN", "")
-    print(f"Owner authentication: {'configured' if owner_password else 'NOT CONFIGURED (read-only health endpoint only)'}")
+    print(f"Owner SMS authentication: {'configured' if sms_auth_configured() else 'NOT CONFIGURED (health endpoint only)'}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -144,7 +144,7 @@ function emptyState(title, detail) {
 function accessPanel(error = null) {
   const configured = state.health?.checks?.authentication === 'ONLINE';
   const title = configured ? 'سجّل دخول المالك لعرض بيانات الشركة' : 'المصادقة غير مهيأة';
-  const detail = error || (configured ? 'بيانات المهام والموافقات خاصة. أدخل كلمة مرور المالك لضمان عدم كشفها.' : 'الخادم الخلفي وقاعدة البيانات جاهزان، لكن كلمة مرور المالك لم تُضبط بعد. عيّن OWNER_MASTER_PASSWORD على الخادم لفتح بيانات الشركة وتفعيل التعديلات.');
+  const detail = error || (configured ? 'بيانات المهام والموافقات خاصة. أكمل التحقق عبر SMS للمالك لفتحها.' : 'الخادم وقاعدة البيانات جاهزان، لكن إعدادات التحقق عبر SMS غير مكتملة في Production.');
   return `<section class="panel access-panel"><div class="access-icon">◇</div><div><span class="eyebrow">وضع الوصول المحمي</span><h2>${esc(title)}</h2><p>${esc(detail)}</p><button class="button button-primary" data-open-auth>تهيئة أو إدخال كلمة مرور المالك</button></div></section><section class="panel health-embed"><div class="panel-heading"><div><h2 class="panel-title">صحة الأنظمة المتاحة للفحص العام</h2><div class="panel-caption">البيانات الخاصة تبقى مغلقة حتى التحقق.</div></div></div>${healthCards(state.health)}</section>`;
 }
 function metricCard(name, metric, icon) {
@@ -276,14 +276,14 @@ async function externalIntegrationsPage() {
   return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">مولدات الوسائط والحسابات</h2><div class="panel-caption">تكاملات Kling للفيديو وElevenLabs للصوت · قائمة الحسابات تُحمّل تدريجياً.</div></div>${statusBadge(summary.total_accounts ? 'READY' : 'NOT_CONFIGURED')}</div><div class="integration-metrics">${adapterCards}<div class="integration-metric"><span>إجمالي الحسابات</span><strong>${Number(summary.total_accounts) || 0}</strong></div><div class="integration-metric"><span>نشطة للفيديو / الصوت</span><strong>${Number(summary.active_by_service?.VIDEO) || 0} / ${Number(summary.active_by_service?.AUDIO) || 0}</strong></div></div><div class="integration-notice"><strong>العرض المحمي:</strong> تُعرض خمس بطاقات مقنّعة أولاً؛ استخدم البحث بالكود أو «عرض المزيد». لا تعود مفاتيح API إلى المتصفح. لا يُرسل طلب توليد إلا عند إرسال النموذج. عند نفاد رصيد صريح أو رفض الاعتماد، يُوقف الحساب ويُجرّب كل بديل نشط مرة واحدة كحد أقصى. يعمل التدوير الآلي لمهام الصوت والفيديو عبر المزودين المهيئين.</div></section><section class="panel"><div class="panel-heading"><div><h2 class="panel-title">إنشاء صوت + فيديو</h2><div class="panel-caption">أنبوب تنفيذي متسلسل: ElevenLabs أولاً، ثم Kling، ثم دمج الصوت مع الفيديو محلياً.</div></div></div><form class="generation-form" data-generation-form="pipeline"><label class="field-group"><span class="field-label">معرّف صوت ElevenLabs</span><input name="voice_id" maxlength="120" required placeholder="Voice ID من مكتبة ElevenLabs"></label><label class="field-group"><span class="field-label">نموذج الصوت</span><input name="model_id" maxlength="100" value="eleven_multilingual_v2" required></label><label class="field-group generation-wide"><span class="field-label">النص المنطوق</span><textarea name="script_text" maxlength="5000" required rows="5" placeholder="النص الذي سيُحوّل إلى تعليق صوتي"></textarea></label><label class="field-group generation-wide"><span class="field-label">وصف المشهد المرئي لـ Kling (حتى 3072 محرفاً)</span><textarea name="visual_prompt" maxlength="3072" required rows="4" placeholder="صف المشهد والحركة والأسلوب والكاميرا"></textarea></label><label class="field-group"><span class="field-label">مدة الفيديو المولّد</span><select name="duration"><option value="5">5 ثوانٍ</option><option value="10">10 ثوانٍ</option><option value="15">15 ثانية</option></select></label><label class="field-group"><span class="field-label">الدقة</span><select name="resolution"><option value="720p">720p</option><option value="1080p">1080p</option><option value="4k">4K</option></select></label><label class="field-group"><span class="field-label">نسبة الأبعاد</span><select name="aspect_ratio"><option value="16:9">16:9 أفقي</option><option value="9:16">9:16 عمودي</option><option value="1:1">1:1 مربع</option></select></label><div class="generation-warning generation-wide">قد يستهلك الطلب رصيداً من ElevenLabs وKling. إذا كان الصوت أطول من الفيديو، يمدد الدمج آخر إطار ثابتاً حتى نهاية التعليق. لا توجد مزامنة شفاه تلقائية. ${canPipeline ? '' : 'أضف حساباً نشطاً مهيأً لكل من ElevenLabs وKling لتفعيل النموذج.'}</div><div class="integration-form-actions generation-wide"><button class="button button-primary" type="submit" ${canPipeline ? '' : 'disabled'}>إنشاء الأنبوب</button><span class="panel-caption">سيظهر الحساب الموقوف وسبب التدوير في سجل الإنتاج.</span></div></form></section><section class="panel"><div class="panel-heading"><div><h2 class="panel-title">سجل الإنتاج</h2><div class="panel-caption">المهام محفوظة في قاعدة البيانات؛ ملفات النشر في التخزين الدائم.</div></div></div><div class="generation-list">${generationRows}</div></section><section class="panel"><div class="panel-heading"><div><h2 class="panel-title">إضافة حساب</h2><div class="panel-caption">أدخل مفتاح API مرة واحدة؛ يُشفّر ولا يُعرض بعد الحفظ.</div></div><span class="text-pill">${Number(summary.total_accounts) || 0} حساباً</span></div><form class="integration-account-form" data-integration-form="create"><label class="field-group"><span class="field-label">اسم تعريفي</span><input name="label" maxlength="120" autocomplete="off" required placeholder="مثال: حساب إنتاج 01"></label><label class="field-group"><span class="field-label">مزود الخدمة</span><select name="provider" required data-provider-choice><option value="Kling">Kling</option><option value="ElevenLabs">ElevenLabs</option></select></label><label class="field-group"><span class="field-label">نوع الخدمة</span><input type="hidden" name="service" value="VIDEO"><span class="text-pill provider-service-label" data-provider-service-label>فيديو</span></label><label class="field-group"><span class="field-label">بادئة رمز الحساب (اختياري)</span><input name="prefix" minlength="2" maxlength="8" pattern="[A-Za-z0-9]{2,8}" autocomplete="off" placeholder="KL أو EL"></label><label class="field-group"><span class="field-label">منطقة الوجهة</span><select name="region_code"><option value="UN">🌐 غير محدد</option><option value="US">🇺🇸 أمريكا</option><option value="EU">🇪🇺 أوروبا</option><option value="TR">🇹🇷 تركيا</option><option value="RU">🇷🇺 روسيا</option><option value="EG">🇪🇬 مصر</option></select></label><label class="field-group integration-secret-field"><span class="field-label">مفتاح API (يُرسل إلى مزوده الرسمي فقط)</span><input type="password" name="credential" minlength="8" maxlength="8192" autocomplete="new-password" required placeholder="لن يُعرض بعد الحفظ"></label><div class="integration-form-actions"><button class="button button-primary" type="submit">＋ حفظ الحساب مشفراً</button><span class="panel-caption">استخدم مفاتيح تملكها أو لديك تصريح باستخدامها.</span></div></form></section><section class="panel"><div class="panel-heading"><div><h2 class="panel-title">الحسابات المحفوظة</h2><div class="panel-caption">تظهر الرموز وحالة الخدمة فقط؛ افتح التفاصيل عند الحاجة. مفاتيح API لا تُعرض.</div></div></div>${renderAccountSearch(search, problems)}<div id="integration-account-results">${renderAccountResults(data)}</div></section>${rotationCards ? `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">اختيار الحساب التالي يدوياً</h2><div class="panel-caption">يحدّث مؤشر Round-robin فقط؛ لا يرسل طلب توليد.</div></div></div><div class="integration-provider-grid">${rotationCards}</div></section>` : ''}`;
 }
 function securityPage() {
-  return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">الأمان والوصول</h2><div class="panel-caption">صلاحية واحدة للمالك في هذه المرحلة؛ لا توجد حسابات أعضاء أو أدوار متعددة.</div></div>${statusBadge(state.health?.checks?.authentication || 'ERROR')}</div><div class="security-callout"><strong>${state.health?.checks?.authentication === 'ONLINE' ? 'كلمة مرور المالك مضبوطة على الخادم.' : 'كلمة مرور المالك غير مهيأة.'}</strong><p>الواجهات الخاصة تتطلب OWNER_MASTER_PASSWORD (أو OWNER_API_TOKEN للتوافق) عبر ترويسة X-Owner-Token. السر لا يُضمّن في الملفات ولا يُرسل إلى سجل النشاط. يخزنه المتصفح في sessionStorage للجلسة الحالية فقط.</p>${state.authorized ? '<button class="button button-quiet" id="logout-button">إنهاء جلسة المالك</button>' : '<button class="button button-primary" data-open-auth>إدخال كلمة مرور المالك</button>'}</div></section><section class="panel health-embed"><div class="panel-heading"><div><h2 class="panel-title">حالة النظام الفعلية</h2><div class="panel-caption">الاتصال بالخادم وقاعدة البيانات مفحوص عند الطلب.</div></div><button class="button button-quiet" id="refresh-health">إعادة الفحص</button></div>${healthCards(state.health)}</section>`;
+  return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">الأمان والوصول</h2><div class="panel-caption">صلاحية واحدة للمالك في هذه المرحلة؛ لا توجد حسابات أعضاء أو أدوار متعددة.</div></div>${statusBadge(state.health?.checks?.authentication || 'ERROR')}</div><div class="security-callout"><strong>${state.health?.checks?.authentication === 'ONLINE' ? 'التحقق عبر SMS مهيأ على الخادم.' : 'التحقق عبر SMS غير مهيأ.'}</strong><p>تتطلب الواجهات الخاصة رمز تحقق مؤقتاً عبر SMS. لا تُخزن رموز التحقق مكشوفة؛ وبعد النجاح تنشأ جلسة مالك محدودة الصلاحية.</p>${state.authorized ? '<button class="button button-quiet" id="logout-button">إنهاء جلسة المالك</button>' : '<button class="button button-primary" data-open-auth>طلب رمز SMS للمالك</button>'}</div></section><section class="panel health-embed"><div class="panel-heading"><div><h2 class="panel-title">حالة النظام الفعلية</h2><div class="panel-caption">الاتصال بالخادم وقاعدة البيانات مفحوص عند الطلب.</div></div><button class="button button-quiet" id="refresh-health">إعادة الفحص</button></div>${healthCards(state.health)}</section>`;
 }
 function settingsPage() {
   const checks = Object.entries(state.health?.checks || {}).filter(([key]) => !['backend', 'database', 'database_engine', 'authentication'].includes(key));
   const externalRows = checks.map(([key, value]) => `<div class="setting-row"><div class="setting-copy"><strong>${esc(key)}</strong><small>قراءة آلية من بيئة الخادم</small></div>${typeof value === 'string' ? statusBadge(value) : statusBadge('NOT_CONFIGURED')}</div>`).join('');
   const services = state.serviceIntegrations || [];
   const serviceRows = services.map((item) => `<article class="integration-source-card"><div><strong>${esc(item.label)}</strong><small>مصدر آلي: ${esc(label(item.automatic_status))} · يدوي: ${esc(label(item.manual_status))}</small></div><span class="source-badge ${item.source === 'manual' ? 'manual' : 'automatic'}">مصدر: ${item.source === 'manual' ? 'مدخل يدوي' : 'الخادم آلياً'}</span><button class="button button-quiet small-button" type="button" data-manage-service="${esc(item.key)}">إدارة / إضافة يدوي</button></article>`).join('');
-  return `<section class="panel password-settings-panel"><div class="panel-heading"><div><h2 class="panel-title">تغيير كلمة السر</h2><div class="panel-caption">يتطلب الرمز الحالي والرمز الجديد وتأكيده؛ يُحفظ التغيير بشكل دائم على الخادم.</div></div><span class="security-lock">⌁</span></div><form id="owner-password-form" class="compact-form"><label class="field-label">كلمة السر الحالية</label><input class="text-field" name="current_password" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="current-password" required /><label class="field-label">كلمة السر الجديدة</label><input class="text-field" name="new_password" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="new-password" required /><label class="field-label">تأكيد كلمة السر الجديدة</label><input class="text-field" name="confirm_password" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="new-password" required /><div id="owner-password-error" class="form-error" hidden></div><div class="form-actions"><button class="button button-primary" type="submit">حفظ كلمة السر بشكل دائم</button></div></form></section><section class="panel"><div class="panel-heading"><div><h2 class="panel-title">إعدادات التشغيل والتكاملات</h2><div class="panel-caption">كل خدمة تُقرأ آلياً من بيئة الخادم، ويمكن إضافة إعداد يدوي مشفّر عند الحاجة.</div></div><button class="button button-primary" type="button" id="add-integration-button">＋ إضافة تكامل</button></div><div class="integration-source-list">${serviceRows || emptyState('جار تحميل التكاملات', 'أعد فتح الإعدادات بعد لحظات.')}</div><div class="panel-divider"></div><div class="setting-row"><div class="setting-copy"><strong>Backend API</strong><small>نفس المصدر · /api</small></div>${statusBadge(state.health?.checks?.backend || 'ERROR')}</div><div class="setting-row"><div class="setting-copy"><strong>قاعدة البيانات</strong><small>${esc(state.health?.checks?.database_engine || 'محرك غير معروف')}</small></div>${statusBadge(state.health?.checks?.database || 'ERROR')}</div><div class="setting-row"><div class="setting-copy"><strong>المصادقة</strong><small>OWNER_MASTER_PASSWORD من بيئة الخادم</small></div>${statusBadge(state.health?.checks?.authentication || 'NOT_CONFIGURED')}</div>${externalRows}<p class="panel-caption">المفاتيح اليدوية لا تعود إلى المتصفح بعد الحفظ؛ زر العين يبدّل إظهار الحقل قبل الإرسال فقط. يتطلب حفظ الأسرار مفتاح AI_MEDIA_VAULT_KEY مهيأً على الخادم.</p></section>`;
+  return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">إعدادات التشغيل والتكاملات</h2><div class="panel-caption">كل خدمة تُقرأ آلياً من بيئة الخادم، ويمكن إضافة إعداد يدوي مشفّر عند الحاجة.</div></div><button class="button button-primary" type="button" id="add-integration-button">＋ إضافة تكامل</button></div><div class="integration-source-list">${serviceRows || emptyState('جار تحميل التكاملات', 'أعد فتح الإعدادات بعد لحظات.')}</div><div class="panel-divider"></div><div class="setting-row"><div class="setting-copy"><strong>Backend API</strong><small>نفس المصدر · /api</small></div>${statusBadge(state.health?.checks?.backend || 'ERROR')}</div><div class="setting-row"><div class="setting-copy"><strong>قاعدة البيانات</strong><small>${esc(state.health?.checks?.database_engine || 'محرك غير معروف')}</small></div>${statusBadge(state.health?.checks?.database || 'ERROR')}</div><div class="setting-row"><div class="setting-copy"><strong>المصادقة</strong><small>إعدادات SMS محمية في بيئة الإنتاج</small></div>${statusBadge(state.health?.checks?.authentication || 'NOT_CONFIGURED')}</div>${externalRows}<p class="panel-caption">المفاتيح اليدوية لا تعود إلى المتصفح بعد الحفظ؛ زر العين يبدّل إظهار الحقل قبل الإرسال فقط. يتطلب حفظ الأسرار مفتاح AI_MEDIA_VAULT_KEY مهيأً على الخادم.</p></section>`;
 }
 function openServiceModal(key = 'manus') {
   const modal = $('#service-integration-overlay');
@@ -318,7 +318,7 @@ async function handleLiveVoiceTranscript(text) {
 function installVoiceConversation() {
   voiceEngine = new VoiceEngine({onState: setVoiceState, onTranscript: handleLiveVoiceTranscript, onError: (message) => toast(message, 'error')});
   $('#voice-live-toggle').addEventListener('click', async () => {
-    if (!state.authorized) return openModal('auth-overlay');
+    if (!state.authorized) return openOwnerAuth();
     if (voiceEngine.running) { voiceEngine.stop(); toast('تم إيقاف المحادثة الصوتية الحرة.'); return; }
     try { await voiceEngine.start(); toast('المحادثة الصوتية مفعلة؛ تحدث الآن.'); }
     catch (error) { setVoiceState('ready'); toast(error.message || 'تعذر تفعيل المحادثة الصوتية.', 'error'); }
@@ -371,7 +371,7 @@ function renderPendingExecution(command) {
 }
 async function sendCommand(command, source = 'text', audioBase64 = '', attachment = null) {
   if (!command && !audioBase64 && !attachment) return toast('اكتب أمراً أو أضف مرفقاً أولاً.', 'error');
-  if (!state.authorized) return openModal('auth-overlay');
+  if (!state.authorized) return openOwnerAuth();
   const button = $('#command-send'); if (button) button.disabled = true;
   setCommandMeta('command-execution-state', 'جار تنفيذ الأمر…');
   const pendingCard = renderPendingExecution(command || 'مرفق صوتي أو وسائط');
@@ -556,7 +556,6 @@ function bindPageEvents() {
       decideApproval(id, decision, '');
     }
   }));
-  $$('[data-open-auth]').forEach((button) => button.addEventListener('click', () => openModal('auth-overlay')));
   $('#logout-button')?.addEventListener('click', logout);
   $('#refresh-health')?.addEventListener('click', refreshHealth);
   $('#add-integration-button')?.addEventListener('click', () => openServiceModal());
@@ -575,7 +574,8 @@ async function refreshHealth() {
   try { state.health = await api.health(); renderHealth(); updateAuthUI(); if (state.page === 'security') await renderPage('security'); }
   catch (error) { toast(apiFailure(error), 'error'); }
 }
-function logout() {
+async function logout() {
+  try { if (api.hasToken) await api.logout(); } catch { /* The local session is still cleared below. */ }
   api.clearToken();
   state.authorized = false;
   state.dashboard = null;
@@ -585,8 +585,155 @@ function logout() {
 }
 function formObject(form) { return Object.fromEntries(new FormData(form).entries()); }
 
-$('#auth-button').addEventListener('click', () => state.authorized ? logout() : openModal('auth-overlay'));
-$('#owner-profile').addEventListener('click', () => openModal('auth-overlay'));
+let pendingOwnerTarget = '';
+let otpCountdownTimer = null;
+async function openOwnerAuth() {
+  clearInterval(otpCountdownTimer);
+  pendingOwnerTarget = '';
+  $('#otp-request-form').hidden = false;
+  $('#otp-verify-form').hidden = true;
+  $('#owner-recovery-form').hidden = true;
+  $('#owner-otp-input').value = '';
+  $('#owner-recovery-input').value = '';
+  $('#owner-phone-target').innerHTML = '<option value="">جار تحميل الأرقام الموثوقة…</option>';
+  showFormError('otp-request-error');
+  showFormError('otp-verify-error');
+  showFormError('owner-recovery-error');
+  openModal('auth-overlay');
+  try {
+    const result = await api.ownerOtpTargets();
+    const select = $('#owner-phone-target');
+    select.innerHTML = '<option value="">اختر رقماً موثوقاً</option>' + (result.targets || []).map((target) =>
+      `<option value="${esc(target.id)}">${esc(target.label)} · ${esc(target.masked_number)}</option>`).join('');
+  } catch (error) {
+    $('#owner-phone-target').innerHTML = '<option value="">الأرقام غير متاحة حالياً</option>';
+    showFormError('otp-request-error', apiFailure(error));
+  }
+}
+async function completeOwnerLogin(token, successMessage) {
+  api.setToken(token);
+  try {
+    state.dashboard = await api.dashboard();
+    state.authorized = true;
+    await loadServiceIntegrations();
+    updateAuthUI();
+    closeModal('auth-overlay');
+    toast(successMessage);
+    await renderPage(state.page);
+  } catch (error) {
+    api.clearToken();
+    state.authorized = false;
+    updateAuthUI();
+    throw error;
+  }
+}
+function startOtpCountdown(resendAfter = 60, expiresIn = 300) {
+  clearInterval(otpCountdownTimer);
+  const resendAt = Date.now() + resendAfter * 1000;
+  const expiresAt = Date.now() + expiresIn * 1000;
+  const resend = $('#resend-owner-otp');
+  const countdown = $('#otp-countdown');
+  const format = (seconds) => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+  const tick = () => {
+    const resendRemaining = Math.max(0, Math.ceil((resendAt - Date.now()) / 1000));
+    const expiryRemaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+    resend.disabled = resendRemaining > 0;
+    resend.textContent = resendRemaining ? `إعادة الإرسال بعد ${format(resendRemaining)}` : 'إعادة إرسال الرمز';
+    countdown.textContent = expiryRemaining ? `الرمز صالح لمدة ${format(expiryRemaining)}.` : 'انتهت صلاحية الرمز؛ اطلب رمزاً جديداً.';
+    if (!resendRemaining && !expiryRemaining) clearInterval(otpCountdownTimer);
+  };
+  tick();
+  otpCountdownTimer = setInterval(tick, 1000);
+}
+
+$('#otp-request-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  showFormError('otp-request-error');
+  const button = event.submitter;
+  if (button) button.disabled = true;
+  pendingOwnerTarget = $('#owner-phone-target').value;
+  try {
+    const result = await api.requestOwnerOtp(pendingOwnerTarget);
+    $('#otp-request-form').hidden = true;
+    $('#otp-verify-form').hidden = false;
+    $('#owner-otp-input').focus();
+    startOtpCountdown(result.resend_after, result.expires_in);
+  } catch (error) {
+    showFormError('otp-request-error', apiFailure(error));
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+$('#otp-verify-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  showFormError('otp-verify-error');
+  const button = event.submitter;
+  if (button) button.disabled = true;
+  try {
+    const result = await api.verifyOwnerOtp(pendingOwnerTarget, $('#owner-otp-input').value);
+    $('#owner-otp-input').value = '';
+    pendingOwnerTarget = '';
+    clearInterval(otpCountdownTimer);
+    await completeOwnerLogin(result.token, 'تم التحقق من رمز SMS وتسجيل دخول المالك.');
+  } catch (error) {
+    showFormError('otp-verify-error', apiFailure(error));
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+$('#resend-owner-otp').addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  if (button.disabled || !pendingOwnerTarget) return;
+  button.disabled = true;
+  showFormError('otp-verify-error');
+  try {
+    const result = await api.requestOwnerOtp(pendingOwnerTarget);
+    $('#owner-otp-input').value = '';
+    startOtpCountdown(result.resend_after, result.expires_in);
+    toast('إذا كانت الوجهة موثوقة، فسيعاد إرسال رمز التحقق.');
+  } catch (error) {
+    showFormError('otp-verify-error', apiFailure(error));
+    startOtpCountdown(60, 0);
+  }
+});
+$('#change-owner-phone').addEventListener('click', () => {
+  clearInterval(otpCountdownTimer);
+  pendingOwnerTarget = '';
+  $('#owner-otp-input').value = '';
+  $('#otp-verify-form').hidden = true;
+  $('#otp-request-form').hidden = false;
+  $('#owner-phone-target').focus();
+});
+$('#show-recovery-form').addEventListener('click', () => {
+  $('#otp-request-form').hidden = true;
+  $('#otp-verify-form').hidden = true;
+  $('#owner-recovery-form').hidden = false;
+  $('#owner-recovery-input').focus();
+});
+$('#back-to-owner-otp').addEventListener('click', () => {
+  $('#owner-recovery-form').hidden = true;
+  $('#otp-request-form').hidden = false;
+  showFormError('owner-recovery-error');
+  $('#owner-recovery-input').value = '';
+});
+$('#owner-recovery-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  showFormError('owner-recovery-error');
+  const button = event.submitter;
+  if (button) button.disabled = true;
+  try {
+    const result = await api.verifyOwnerRecovery($('#owner-recovery-input').value);
+    $('#owner-recovery-input').value = '';
+    await completeOwnerLogin(result.token, 'تم التحقق من Recovery Code واستخدامه لمرة واحدة.');
+  } catch (error) {
+    showFormError('owner-recovery-error', apiFailure(error));
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+
+$('#auth-button').addEventListener('click', () => state.authorized ? logout() : openOwnerAuth());
+$('#owner-profile').addEventListener('click', () => openOwnerAuth());
 $('#sidebar-navigation').addEventListener('click', (event) => {
   const button = event.target.closest('[data-page]');
   if (!button) return;
@@ -670,7 +817,7 @@ $('#page-content').addEventListener('click', async (event) => {
   if (companyAction) return;
   const button = event.target.closest('[data-page]');
   if (button) renderPage(button.dataset.page);
-  if (event.target.closest('[data-open-auth]')) openModal('auth-overlay');
+  if (event.target.closest('[data-open-auth]')) openOwnerAuth();
 });
 $('#page-content').addEventListener('input', (event) => {
   const search = event.target.closest('[data-account-search]');
@@ -747,56 +894,12 @@ $('#service-integration-form').addEventListener('submit', async (event) => {
   catch (error) { showFormError('service-integration-error', apiFailure(error)); }
   finally { if (button) button.disabled = false; }
 });
-$('#forgot-password-toggle').addEventListener('click', () => { $('#auth-form').hidden = true; $('#recovery-form').hidden = false; });
-$('#back-to-login').addEventListener('click', () => { $('#recovery-form').hidden = true; $('#auth-form').hidden = false; showFormError('recovery-error'); });
-$('#recovery-form').addEventListener('submit', async (event) => {
-  event.preventDefault(); showFormError('recovery-error');
-  const form = event.currentTarget; const button = event.submitter; if (button) button.disabled = true;
-  try { const values = formObject(form); await api.resetOwnerPassword(values); api.setToken(values.new_password); form.reset(); $('#recovery-form').hidden = true; $('#auth-form').hidden = false; closeModal('auth-overlay'); state.authorized = true; updateAuthUI(); toast('تمت استعادة رمز المالك وحفظه على الخادم.'); await renderPage(state.page); }
-  catch (error) { showFormError('recovery-error', apiFailure(error)); }
-  finally { if (button) button.disabled = false; }
-});
-$('#auth-form').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  showFormError('auth-error');
-  api.setToken($('#owner-token-input').value);
-  try {
-    state.dashboard = await api.dashboard();
-    state.authorized = true;
-    await loadServiceIntegrations();
-    updateAuthUI();
-    closeModal('auth-overlay');
-    $('#owner-token-input').value = '';
-    toast('تم التحقق من صلاحية المالك.');
-    await renderPage(state.page);
-  } catch (error) {
-    api.clearToken();
-    state.authorized = false;
-    updateAuthUI();
-    showFormError('auth-error', apiFailure(error));
-  }
-});
-$('#clear-token-button').addEventListener('click', () => { api.clearToken(); state.authorized = false; updateAuthUI(); $('#owner-token-input').value = ''; showFormError('auth-error'); toast('تم مسح رمز الجلسة.'); });
-document.addEventListener('submit', async (event) => {
-  if (event.target.id !== 'owner-password-form') return;
-  event.preventDefault();
-  showFormError('owner-password-error');
-  const form = event.target;
-  const button = event.submitter;
-  if (button) button.disabled = true;
-  try {
-    const newPassword = form.elements.new_password.value;
-    const confirmPassword = form.elements.confirm_password.value;
-    if (newPassword !== confirmPassword) throw new Error('تأكيد كلمة السر الجديدة غير مطابق.');
-    await api.changeOwnerPassword(formObject(form));
-    api.setToken(newPassword);
-    form.reset();
-    toast('تم تغيير رمز المالك بنجاح.');
-  } catch (error) {
-    showFormError('owner-password-error', apiFailure(error));
-  } finally {
-    if (button) button.disabled = false;
-  }
+$('#cancel-owner-auth').addEventListener('click', () => {
+  clearInterval(otpCountdownTimer);
+  pendingOwnerTarget = '';
+  $('#owner-otp-input').value = '';
+  $('#owner-recovery-input').value = '';
+  closeModal('auth-overlay');
 });
 $('#task-form').addEventListener('submit', async (event) => {
   event.preventDefault(); showFormError('task-error');
