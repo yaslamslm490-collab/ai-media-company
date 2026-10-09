@@ -309,6 +309,76 @@ class AuthNotConfiguredTest(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=3)
 
+    def test_forgot_password_valid_invalid_and_revokes_old_sessions(self):
+        def post_json(base: str, path: str, payload: dict, cookie: str = "") -> tuple[int, dict]:
+            headers = {"Content-Type": "application/json"}
+            if cookie:
+                headers["Cookie"] = cookie
+            request = Request(base + path, data=json.dumps(payload).encode(), headers=headers, method="POST")
+            try:
+                with urlopen(request, timeout=3) as response:
+                    return response.status, json.loads(response.read())
+            except HTTPError as error:
+                return error.code, json.loads(error.read())
+
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {
+            "OWNER_MASTER_PASSWORD": "123456",
+            "OWNER_API_TOKEN": "",
+            "OWNER_RECOVERY_CODE": "local-recovery-code",
+        }):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3"))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            try:
+                status, login = post_json(base, "/api/auth/login", {"username": "owner", "password": "123456"})
+                self.assertEqual(status, 200)
+                cookie = login.get("authenticated") and ""
+                login_request = Request(base + "/api/auth/login", data=json.dumps({"username": "owner", "password": "123456"}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+                with urlopen(login_request, timeout=3) as response:
+                    cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+                self.assertTrue(cookie.startswith("ai_media_session="))
+
+                status, payload = post_json(base, "/api/auth/reset-password", {"recovery_code": "wrong", "new_password": "654321", "confirm_password": "654321"})
+                self.assertEqual((status, payload["error"]["code"]), (401, "invalid_recovery_code"))
+                status, payload = post_json(base, "/api/auth/reset-password", {"recovery_code": "local-recovery-code", "new_password": "12345", "confirm_password": "12345"})
+                self.assertEqual((status, payload["error"]["code"]), (400, "invalid_reset_password"))
+                status, payload = post_json(base, "/api/auth/reset-password", {"recovery_code": "local-recovery-code", "new_password": "654321", "confirm_password": "654320"})
+                self.assertEqual((status, payload["error"]["code"]), (400, "invalid_reset_password"))
+
+                status, payload = post_json(base, "/api/auth/reset-password", {"recovery_code": "local-recovery-code", "new_password": "654321", "confirm_password": "654321"})
+                self.assertEqual((status, payload["reset"]), (200, True))
+                revoked_request = Request(base + "/api/dashboard", headers={"Cookie": cookie})
+                with self.assertRaises(HTTPError) as revoked:
+                    urlopen(revoked_request, timeout=3)
+                self.assertEqual(revoked.exception.code, 401)
+
+                status, _ = post_json(base, "/api/auth/login", {"username": "owner", "password": "123456"})
+                self.assertEqual(status, 401)
+                status, login = post_json(base, "/api/auth/login", {"username": "owner", "password": "654321"})
+                self.assertEqual((status, login["authenticated"]), (200, True))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {
+            "OWNER_MASTER_PASSWORD": "123456",
+            "OWNER_API_TOKEN": "",
+            "OWNER_RECOVERY_CODE": "",
+        }):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3"))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            try:
+                status, payload = post_json(base, "/api/auth/reset-password", {"recovery_code": "anything", "new_password": "654321", "confirm_password": "654321"})
+                self.assertEqual((status, payload["error"]["code"]), (503, "recovery_not_configured"))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
     def test_owner_secret_rejects_fewer_than_six_characters(self):
         with tempfile.TemporaryDirectory() as temp:
             with self.assertRaisesRegex(ValueError, "at least 6 characters"):
