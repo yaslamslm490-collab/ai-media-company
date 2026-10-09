@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import base64
+import hashlib
+import hmac
+import secrets
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -21,6 +25,28 @@ def utc_now() -> str:
 
 def new_id() -> str:
     return uuid.uuid4().hex
+
+
+PASSWORD_ITERATIONS = 310_000
+
+
+def hash_password(password: str, salt: bytes | None = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_ITERATIONS)
+    return f"pbkdf2_sha256${PASSWORD_ITERATIONS}${base64.urlsafe_b64encode(salt).decode()}${base64.urlsafe_b64encode(digest).decode()}"
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    try:
+        algorithm, iterations, salt_b64, digest_b64 = encoded.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        salt = base64.urlsafe_b64decode(salt_b64.encode())
+        expected = base64.urlsafe_b64decode(digest_b64.encode())
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, int(iterations))
+        return hmac.compare_digest(actual, expected)
+    except (ValueError, TypeError):
+        return False
 
 
 class Store:
@@ -141,6 +167,24 @@ class Store:
                 );
             """)
                 record_migration(db, "001-core-v1", utc_now())
+            if not migration_applied(db, "004-authentication"):
+                db.execute("""CREATE TABLE IF NOT EXISTS owner_credentials (
+                    id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )""")
+                db.execute("""CREATE TABLE IF NOT EXISTS auth_sessions (
+                    id TEXT PRIMARY KEY,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    revoked_at TEXT NOT NULL DEFAULT ''
+                )""")
+                db.execute("CREATE INDEX IF NOT EXISTS auth_sessions_expiry_idx ON auth_sessions(expires_at)")
+                record_migration(db, "004-authentication", utc_now())
+
             if not migration_applied(db, "002-workspace-pages"):
                 db.execute("""CREATE TABLE IF NOT EXISTS workspace_pages (
                     id TEXT PRIMARY KEY,
@@ -153,11 +197,10 @@ class Store:
                     updated_at TEXT NOT NULL
                 )""")
                 if self.is_mysql:
-                    # MySQL cannot index LONGTEXT; this migration may be retried after a
-                    # partially-created table from an earlier failed startup.
                     db.execute("ALTER TABLE workspace_pages MODIFY COLUMN updated_at VARCHAR(191) NOT NULL")
                 db.execute("CREATE INDEX IF NOT EXISTS workspace_pages_updated_idx ON workspace_pages(updated_at DESC)")
                 record_migration(db, "002-workspace-pages", utc_now())
+
             if not migration_applied(db, "003-execution-reports"):
                 db.execute("""CREATE TABLE IF NOT EXISTS execution_reports (
                     id TEXT PRIMARY KEY,
@@ -177,6 +220,73 @@ class Store:
                     db.execute("ALTER TABLE execution_reports MODIFY COLUMN started_at VARCHAR(191) NOT NULL")
                 db.execute("CREATE INDEX IF NOT EXISTS execution_reports_started_idx ON execution_reports(started_at DESC)")
                 record_migration(db, "003-execution-reports", utc_now())
+
+    def ensure_owner_credential(self, bootstrap_password: str) -> None:
+        if not bootstrap_password:
+            return
+        now = utc_now()
+        with self.connect() as db:
+            row = db.execute("SELECT id FROM owner_credentials WHERE username=?", ("owner",)).fetchone()
+            if row is None:
+                db.execute("INSERT INTO owner_credentials (id,username,password_hash,created_at,updated_at) VALUES (?,?,?,?,?)",
+                           (new_id(), "owner", hash_password(bootstrap_password), now, now))
+
+    def owner_credential_exists(self) -> bool:
+        with self.connect() as db:
+            row = db.execute("SELECT id FROM owner_credentials WHERE username=?", ("owner",)).fetchone()
+        return bool(row)
+
+    def verify_owner_password(self, password: str) -> bool:
+        with self.connect() as db:
+            row = db.execute("SELECT password_hash FROM owner_credentials WHERE username=?", ("owner",)).fetchone()
+        return bool(row and verify_password(password, row[0] if not isinstance(row, dict) else row["password_hash"]))
+
+    def change_owner_password(self, new_password: str) -> None:
+        with self.connect() as db:
+            now = utc_now()
+            row = db.execute("SELECT id FROM owner_credentials WHERE username=?", ("owner",)).fetchone()
+            if row:
+                db.execute("UPDATE owner_credentials SET password_hash=?,updated_at=? WHERE username=?",
+                           (hash_password(new_password), now, "owner"))
+            else:
+                db.execute("INSERT INTO owner_credentials (id,username,password_hash,created_at,updated_at) VALUES (?,?,?,?,?)",
+                           (new_id(), "owner", hash_password(new_password), now, now))
+
+    def create_session(self, ttl_seconds: int = 8 * 60 * 60) -> tuple[str, str]:
+        raw = secrets.token_urlsafe(32)
+        now = datetime.now(timezone.utc)
+        expires = now.timestamp() + ttl_seconds
+        expires_text = datetime.fromtimestamp(expires, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        with self.connect() as db:
+            db.execute("INSERT INTO auth_sessions (id,token_hash,created_at,expires_at,revoked_at) VALUES (?,?,?,?,?)",
+                       (new_id(), hashlib.sha256(raw.encode()).hexdigest(), now.isoformat(timespec="seconds").replace("+00:00", "Z"), expires_text, ""))
+        return raw, expires_text
+
+    def session_valid(self, raw: str) -> bool:
+        if not raw:
+            return False
+        with self.connect() as db:
+            row = db.execute("SELECT expires_at,revoked_at FROM auth_sessions WHERE token_hash=?",
+                             (hashlib.sha256(raw.encode()).hexdigest(),)).fetchone()
+        if not row:
+            return False
+        expires_at = row[0] if not isinstance(row, dict) else row["expires_at"]
+        revoked_at = row[1] if not isinstance(row, dict) else row["revoked_at"]
+        try:
+            expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return not revoked_at and expiry > datetime.now(timezone.utc)
+
+    def revoke_session(self, raw: str) -> None:
+        if raw:
+            with self.connect() as db:
+                db.execute("UPDATE auth_sessions SET revoked_at=? WHERE token_hash=?",
+                           (utc_now(), hashlib.sha256(raw.encode()).hexdigest()))
+
+    def revoke_all_sessions(self) -> None:
+        with self.connect() as db:
+            db.execute("UPDATE auth_sessions SET revoked_at=? WHERE revoked_at=''", (utc_now(),))
 
     def ping(self) -> bool:
         with self.connect() as db:

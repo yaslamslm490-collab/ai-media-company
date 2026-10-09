@@ -56,6 +56,8 @@ _GLOBAL_INDEX_COLUMNS = {
     "department_knowledge_access": {"department_id", "knowledge_source_id"},
     "workspace_pages": {"id", "slug", "updated_at"},
     "execution_reports": {"id", "started_at"},
+    "auth_sessions": {"id", "token_hash"},
+    "owner_credentials": {"id", "username"},
 }
 _LONG_TEXT_DEFAULT_COLUMNS = {
     "body", "description", "decision_note", "note", "result", "error", "content",

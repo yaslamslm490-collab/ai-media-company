@@ -91,9 +91,8 @@ function showFormError(id, message = '') {
   node.hidden = !message;
 }
 function apiFailure(error) {
-  if (error instanceof ApiError && ['authentication_required', 'invalid_token', 'auth_not_configured'].includes(error.code)) {
+  if (error instanceof ApiError && ['authentication_required', 'invalid_token', 'invalid_session', 'auth_not_configured'].includes(error.code)) {
     state.authorized = false;
-    if (error.code === 'invalid_token') api.clearToken();
     updateAuthUI();
   }
   return error instanceof ApiError ? error.message : 'حدث خطأ غير متوقع أثناء الاتصال بالخادم.';
@@ -276,7 +275,7 @@ async function externalIntegrationsPage() {
   return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">مولدات الوسائط والحسابات</h2><div class="panel-caption">تكاملات Kling للفيديو وElevenLabs للصوت · قائمة الحسابات تُحمّل تدريجياً.</div></div>${statusBadge(summary.total_accounts ? 'READY' : 'NOT_CONFIGURED')}</div><div class="integration-metrics">${adapterCards}<div class="integration-metric"><span>إجمالي الحسابات</span><strong>${Number(summary.total_accounts) || 0}</strong></div><div class="integration-metric"><span>نشطة للفيديو / الصوت</span><strong>${Number(summary.active_by_service?.VIDEO) || 0} / ${Number(summary.active_by_service?.AUDIO) || 0}</strong></div></div><div class="integration-notice"><strong>العرض المحمي:</strong> تُعرض خمس بطاقات مقنّعة أولاً؛ استخدم البحث بالكود أو «عرض المزيد». لا تعود مفاتيح API إلى المتصفح. لا يُرسل طلب توليد إلا عند إرسال النموذج. عند نفاد رصيد صريح أو رفض الاعتماد، يُوقف الحساب ويُجرّب كل بديل نشط مرة واحدة كحد أقصى. يعمل التدوير الآلي لمهام الصوت والفيديو عبر المزودين المهيئين.</div></section><section class="panel"><div class="panel-heading"><div><h2 class="panel-title">إنشاء صوت + فيديو</h2><div class="panel-caption">أنبوب تنفيذي متسلسل: ElevenLabs أولاً، ثم Kling، ثم دمج الصوت مع الفيديو محلياً.</div></div></div><form class="generation-form" data-generation-form="pipeline"><label class="field-group"><span class="field-label">معرّف صوت ElevenLabs</span><input name="voice_id" maxlength="120" required placeholder="Voice ID من مكتبة ElevenLabs"></label><label class="field-group"><span class="field-label">نموذج الصوت</span><input name="model_id" maxlength="100" value="eleven_multilingual_v2" required></label><label class="field-group generation-wide"><span class="field-label">النص المنطوق</span><textarea name="script_text" maxlength="5000" required rows="5" placeholder="النص الذي سيُحوّل إلى تعليق صوتي"></textarea></label><label class="field-group generation-wide"><span class="field-label">وصف المشهد المرئي لـ Kling (حتى 3072 محرفاً)</span><textarea name="visual_prompt" maxlength="3072" required rows="4" placeholder="صف المشهد والحركة والأسلوب والكاميرا"></textarea></label><label class="field-group"><span class="field-label">مدة الفيديو المولّد</span><select name="duration"><option value="5">5 ثوانٍ</option><option value="10">10 ثوانٍ</option><option value="15">15 ثانية</option></select></label><label class="field-group"><span class="field-label">الدقة</span><select name="resolution"><option value="720p">720p</option><option value="1080p">1080p</option><option value="4k">4K</option></select></label><label class="field-group"><span class="field-label">نسبة الأبعاد</span><select name="aspect_ratio"><option value="16:9">16:9 أفقي</option><option value="9:16">9:16 عمودي</option><option value="1:1">1:1 مربع</option></select></label><div class="generation-warning generation-wide">قد يستهلك الطلب رصيداً من ElevenLabs وKling. إذا كان الصوت أطول من الفيديو، يمدد الدمج آخر إطار ثابتاً حتى نهاية التعليق. لا توجد مزامنة شفاه تلقائية. ${canPipeline ? '' : 'أضف حساباً نشطاً مهيأً لكل من ElevenLabs وKling لتفعيل النموذج.'}</div><div class="integration-form-actions generation-wide"><button class="button button-primary" type="submit" ${canPipeline ? '' : 'disabled'}>إنشاء الأنبوب</button><span class="panel-caption">سيظهر الحساب الموقوف وسبب التدوير في سجل الإنتاج.</span></div></form></section><section class="panel"><div class="panel-heading"><div><h2 class="panel-title">سجل الإنتاج</h2><div class="panel-caption">المهام محفوظة في قاعدة البيانات؛ ملفات النشر في التخزين الدائم.</div></div></div><div class="generation-list">${generationRows}</div></section><section class="panel"><div class="panel-heading"><div><h2 class="panel-title">إضافة حساب</h2><div class="panel-caption">أدخل مفتاح API مرة واحدة؛ يُشفّر ولا يُعرض بعد الحفظ.</div></div><span class="text-pill">${Number(summary.total_accounts) || 0} حساباً</span></div><form class="integration-account-form" data-integration-form="create"><label class="field-group"><span class="field-label">اسم تعريفي</span><input name="label" maxlength="120" autocomplete="off" required placeholder="مثال: حساب إنتاج 01"></label><label class="field-group"><span class="field-label">مزود الخدمة</span><select name="provider" required data-provider-choice><option value="Kling">Kling</option><option value="ElevenLabs">ElevenLabs</option></select></label><label class="field-group"><span class="field-label">نوع الخدمة</span><input type="hidden" name="service" value="VIDEO"><span class="text-pill provider-service-label" data-provider-service-label>فيديو</span></label><label class="field-group"><span class="field-label">بادئة رمز الحساب (اختياري)</span><input name="prefix" minlength="2" maxlength="8" pattern="[A-Za-z0-9]{2,8}" autocomplete="off" placeholder="KL أو EL"></label><label class="field-group"><span class="field-label">منطقة الوجهة</span><select name="region_code"><option value="UN">🌐 غير محدد</option><option value="US">🇺🇸 أمريكا</option><option value="EU">🇪🇺 أوروبا</option><option value="TR">🇹🇷 تركيا</option><option value="RU">🇷🇺 روسيا</option><option value="EG">🇪🇬 مصر</option></select></label><label class="field-group integration-secret-field"><span class="field-label">مفتاح API (يُرسل إلى مزوده الرسمي فقط)</span><input type="password" name="credential" minlength="8" maxlength="8192" autocomplete="new-password" required placeholder="لن يُعرض بعد الحفظ"></label><div class="integration-form-actions"><button class="button button-primary" type="submit">＋ حفظ الحساب مشفراً</button><span class="panel-caption">استخدم مفاتيح تملكها أو لديك تصريح باستخدامها.</span></div></form></section><section class="panel"><div class="panel-heading"><div><h2 class="panel-title">الحسابات المحفوظة</h2><div class="panel-caption">تظهر الرموز وحالة الخدمة فقط؛ افتح التفاصيل عند الحاجة. مفاتيح API لا تُعرض.</div></div></div>${renderAccountSearch(search, problems)}<div id="integration-account-results">${renderAccountResults(data)}</div></section>${rotationCards ? `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">اختيار الحساب التالي يدوياً</h2><div class="panel-caption">يحدّث مؤشر Round-robin فقط؛ لا يرسل طلب توليد.</div></div></div><div class="integration-provider-grid">${rotationCards}</div></section>` : ''}`;
 }
 function securityPage() {
-  return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">الأمان والوصول</h2><div class="panel-caption">صلاحية واحدة للمالك في هذه المرحلة؛ لا توجد حسابات أعضاء أو أدوار متعددة.</div></div>${statusBadge(state.health?.checks?.authentication || 'ERROR')}</div><div class="security-callout"><strong>${state.health?.checks?.authentication === 'ONLINE' ? 'كلمة مرور المالك مضبوطة على الخادم.' : 'كلمة مرور المالك غير مهيأة.'}</strong><p>الواجهات الخاصة تتطلب OWNER_MASTER_PASSWORD (أو OWNER_API_TOKEN للتوافق) عبر ترويسة X-Owner-Token. السر لا يُضمّن في الملفات ولا يُرسل إلى سجل النشاط. يخزنه المتصفح في sessionStorage للجلسة الحالية فقط.</p>${state.authorized ? '<button class="button button-quiet" id="logout-button">إنهاء جلسة المالك</button>' : '<button class="button button-primary" data-open-auth>إدخال كلمة مرور المالك</button>'}</div></section><section class="panel health-embed"><div class="panel-heading"><div><h2 class="panel-title">حالة النظام الفعلية</h2><div class="panel-caption">الاتصال بالخادم وقاعدة البيانات مفحوص عند الطلب.</div></div><button class="button button-quiet" id="refresh-health">إعادة الفحص</button></div>${healthCards(state.health)}</section>`;
+  return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">الأمان والوصول</h2><div class="panel-caption">صلاحية واحدة للمالك في هذه المرحلة؛ لا توجد حسابات أعضاء أو أدوار متعددة.</div></div>${statusBadge(state.health?.checks?.authentication || 'ERROR')}</div><div class="security-callout"><strong>${state.health?.checks?.authentication === 'ONLINE' ? 'كلمة مرور المالك مضبوطة على الخادم.' : 'كلمة مرور المالك غير مهيأة.'}</strong><p>تتحقق الواجهة من الخادم عبر /api/auth/login، ثم تُستخدم جلسة HttpOnly محمية بـ Secure وSameSite=None. لا تُخزّن الواجهة كلمة السر أو رمز الجلسة في sessionStorage ولا تُرسل عبر ترويسة خام.</p>${state.authorized ? '<button class="button button-quiet" id="logout-button">إنهاء جلسة المالك</button>' : '<button class="button button-primary" data-open-auth>إدخال كلمة مرور المالك</button>'}</div></section><section class="panel health-embed"><div class="panel-heading"><div><h2 class="panel-title">حالة النظام الفعلية</h2><div class="panel-caption">الاتصال بالخادم وقاعدة البيانات مفحوص عند الطلب.</div></div><button class="button button-quiet" id="refresh-health">إعادة الفحص</button></div>${healthCards(state.health)}</section>`;
 }
 function settingsPage() {
   const checks = Object.entries(state.health?.checks || {}).filter(([key]) => !['backend', 'database', 'database_engine', 'authentication'].includes(key));
@@ -500,7 +499,7 @@ async function renderPage(page = state.page) {
   } catch (error) {
     if (revision !== state.renderRevision) return;
     const message = apiFailure(error);
-    if (!state.authorized && ['authentication_required','invalid_token','auth_not_configured'].includes(error.code)) {
+    if (!state.authorized && ['authentication_required','invalid_token','invalid_session','auth_not_configured'].includes(error.code)) {
       pageContent.innerHTML = accessPanel(message);
     } else {
       pageContent.innerHTML = `<div class="panel error-state"><strong>تعذّر تحميل الوحدة</strong><p>${esc(message)}</p><button class="button button-quiet" id="retry-page">إعادة المحاولة</button></div>`;
@@ -553,8 +552,8 @@ async function refreshHealth() {
   try { state.health = await api.health(); renderHealth(); updateAuthUI(); if (state.page === 'security') await renderPage('security'); }
   catch (error) { toast(apiFailure(error), 'error'); }
 }
-function logout() {
-  api.clearToken();
+async function logout() {
+  try { await api.logout(); } catch { /* انتهاء الجلسة محلياً لا يمنع تنظيف الواجهة. */ }
   state.authorized = false;
   state.dashboard = null;
   updateAuthUI();
@@ -737,15 +736,15 @@ $('#back-to-login').addEventListener('click', () => { $('#recovery-form').hidden
 $('#recovery-form').addEventListener('submit', async (event) => {
   event.preventDefault(); showFormError('recovery-error');
   const form = event.currentTarget; const button = event.submitter; if (button) button.disabled = true;
-  try { const values = formObject(form); await api.resetOwnerPassword(values); api.setToken(values.new_password); form.reset(); $('#recovery-form').hidden = true; $('#auth-form').hidden = false; closeModal('auth-overlay'); state.authorized = true; updateAuthUI(); toast('تمت استعادة رمز المالك وحفظه على الخادم.'); await renderPage(state.page); }
+  try { const values = formObject(form); await api.resetOwnerPassword(values); form.reset(); $('#recovery-form').hidden = true; $('#auth-form').hidden = false; closeModal('auth-overlay'); state.authorized = false; updateAuthUI(); toast('تمت استعادة رمز المالك؛ سجّل الدخول بالرمز الجديد.'); }
   catch (error) { showFormError('recovery-error', apiFailure(error)); }
   finally { if (button) button.disabled = false; }
 });
 $('#auth-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   showFormError('auth-error');
-  api.setToken($('#owner-token-input').value);
   try {
+    await api.login({username: 'owner', password: $('#owner-token-input').value});
     state.dashboard = await api.dashboard();
     state.authorized = true;
     await loadServiceIntegrations();
@@ -755,13 +754,12 @@ $('#auth-form').addEventListener('submit', async (event) => {
     toast('تم التحقق من صلاحية المالك.');
     await renderPage(state.page);
   } catch (error) {
-    api.clearToken();
     state.authorized = false;
     updateAuthUI();
     showFormError('auth-error', apiFailure(error));
   }
 });
-$('#clear-token-button').addEventListener('click', () => { api.clearToken(); state.authorized = false; updateAuthUI(); $('#owner-token-input').value = ''; showFormError('auth-error'); toast('تم مسح رمز الجلسة.'); });
+$('#clear-token-button').addEventListener('click', async () => { try { await api.logout(); } catch {} state.authorized = false; updateAuthUI(); $('#owner-token-input').value = ''; showFormError('auth-error'); toast('تم إبطال جلسة المالك.'); });
 document.addEventListener('submit', async (event) => {
   if (event.target.id !== 'owner-password-form') return;
   event.preventDefault();
@@ -774,7 +772,7 @@ document.addEventListener('submit', async (event) => {
     const confirmPassword = form.elements.confirm_password.value;
     if (newPassword !== confirmPassword) throw new Error('تأكيد كلمة السر الجديدة غير مطابق.');
     await api.changeOwnerPassword(formObject(form));
-    api.setToken(newPassword);
+    await api.login({username: 'owner', password: newPassword});
     form.reset();
     toast('تم تغيير رمز المالك بنجاح.');
   } catch (error) {
@@ -845,10 +843,8 @@ async function boot() {
     $('#global-message').hidden = false;
     $('#global-message').textContent = `تعذّر الوصول إلى API: ${apiFailure(error)}`;
   }
-  if (api.hasToken) {
-    try { state.dashboard = await api.dashboard(); state.authorized = true; await loadServiceIntegrations(); const reports = (await api.executionReports()).reports || []; reports.slice(0, 5).reverse().forEach(renderExecutionReport); }
-    catch (error) { api.clearToken(); state.authorized = false; if (error.code !== 'auth_not_configured') toast(apiFailure(error), 'error'); }
-  }
+  try { state.dashboard = await api.dashboard(); state.authorized = true; await loadServiceIntegrations(); const reports = (await api.executionReports()).reports || []; reports.slice(0, 5).reverse().forEach(renderExecutionReport); }
+  catch (error) { state.authorized = false; if (!['auth_not_configured', 'authentication_required', 'invalid_session'].includes(error.code)) toast(apiFailure(error), 'error'); }
   updateAuthUI();
   await renderPage(state.page);
   setInterval(async () => {

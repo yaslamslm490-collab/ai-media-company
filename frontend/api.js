@@ -1,5 +1,4 @@
 const API_ROOT = '/api';
-let ownerToken = sessionStorage.getItem('ai-media-owner-token') || '';
 
 export class ApiError extends Error {
   constructor(message, status, code, details = {}) {
@@ -18,10 +17,9 @@ async function request(path, {method = 'GET', body, publicEndpoint = false, quer
   });
   const headers = {Accept: 'application/json'};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  if (!publicEndpoint && ownerToken) headers['X-Owner-Token'] = ownerToken;
   let response;
   try {
-    response = await fetch(url, {method, headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store'});
+    response = await fetch(url, {method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: 'same-origin', cache: 'no-store'});
   } catch (error) {
     throw new ApiError('تعذّر الاتصال بالخادم الخلفي.', 0, 'network_error');
   }
@@ -34,11 +32,10 @@ async function request(path, {method = 'GET', body, publicEndpoint = false, quer
 }
 
 async function mediaBlob(generationId, kind) {
-  if (!ownerToken) throw new ApiError('يلزم تسجيل دخول المالك لفتح ملف الوسائط.', 401, 'authentication_required');
   const url = new URL(`${API_ROOT}/external-integrations/generations/${encodeURIComponent(generationId)}/${kind}`, window.location.origin);
   let response;
   try {
-    response = await fetch(url, {headers: {Accept: '*/*', 'X-Owner-Token': ownerToken}, cache: 'no-store'});
+    response = await fetch(url, {headers: {Accept: '*/*'}, credentials: 'same-origin', cache: 'no-store'});
   } catch (error) {
     throw new ApiError('تعذّر الاتصال بالخادم الخلفي.', 0, 'network_error');
   }
@@ -51,13 +48,12 @@ async function mediaBlob(generationId, kind) {
 }
 
 export const api = {
-  get hasToken() { return Boolean(ownerToken); },
-  setToken(token) { ownerToken = token.trim(); if (ownerToken) sessionStorage.setItem('ai-media-owner-token', ownerToken); else sessionStorage.removeItem('ai-media-owner-token'); },
-  clearToken() { this.setToken(''); },
   health: () => request('/health', {publicEndpoint: true}),
   sendCommand: (body) => request('/commands', {method: 'POST', body}),
   serviceIntegrations: () => request('/service-integrations'),
   saveServiceIntegration: (body) => request('/service-integrations', {method: 'POST', body}),
+  login: (body) => request('/auth/login', {method: 'POST', body, publicEndpoint: true}),
+  logout: () => request('/auth/logout', {method: 'POST', publicEndpoint: true}),
   changeOwnerPassword: (body) => request('/auth/change-password', {method: 'POST', body}),
   resetOwnerPassword: (body) => request('/auth/reset-password', {method: 'POST', body}),
   modules: () => request('/modules', {publicEndpoint: true}),

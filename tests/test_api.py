@@ -269,15 +269,41 @@ class ApiTestCase(unittest.TestCase):
 
 
 class AuthNotConfiguredTest(unittest.TestCase):
-    def test_owner_master_password_accepts_six_digits_from_environment(self):
+    def test_owner_master_password_login_session_and_logout(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"OWNER_MASTER_PASSWORD": "123456", "OWNER_API_TOKEN": ""}):
             server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3"))
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
             try:
-                request = Request(f"http://127.0.0.1:{server.server_port}/api/dashboard", headers={"X-Owner-Token": "123456"})
-                with urlopen(request, timeout=3) as response:
+                bad_request = Request(base + "/api/auth/login", data=json.dumps({"username": "owner", "password": "000000"}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+                with self.assertRaises(HTTPError) as bad:
+                    urlopen(bad_request, timeout=3)
+                self.assertEqual(bad.exception.code, 401)
+
+                missing_request = Request(base + "/api/auth/login", data=json.dumps({"username": "missing", "password": "123456"}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+                with self.assertRaises(HTTPError) as missing:
+                    urlopen(missing_request, timeout=3)
+                self.assertEqual(missing.exception.code, 401)
+
+                login_request = Request(base + "/api/auth/login", data=json.dumps({"username": "owner", "password": "123456"}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+                with urlopen(login_request, timeout=3) as response:
                     self.assertEqual(response.status, 200)
+                    cookie = response.headers.get("Set-Cookie", "").split(";", 1)[0]
+                self.assertTrue(cookie.startswith("ai_media_session="))
+
+                dashboard_request = Request(base + "/api/dashboard", headers={"Cookie": cookie})
+                with urlopen(dashboard_request, timeout=3) as response:
+                    self.assertEqual(response.status, 200)
+
+                logout_request = Request(base + "/api/auth/logout", headers={"Cookie": cookie}, method="POST")
+                with urlopen(logout_request, timeout=3) as response:
+                    self.assertEqual(response.status, 200)
+
+                revoked_request = Request(base + "/api/dashboard", headers={"Cookie": cookie})
+                with self.assertRaises(HTTPError) as revoked:
+                    urlopen(revoked_request, timeout=3)
+                self.assertEqual(revoked.exception.code, 401)
             finally:
                 server.shutdown()
                 server.server_close()
