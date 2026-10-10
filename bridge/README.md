@@ -96,7 +96,7 @@ python3 -m bridge.register_webhook
 4. جرّب `submitManusTask` بطلب اختبار غير تعديلي. احتفظ بـ`task_id`، ثم استدعِ `getManusTaskResult` حتى تصبح الحالة `completed` أو `waiting_for_input`.
 5. عند سؤال عادي من Manus، استخدم `sendManusFollowup`. إذا طلب Manus تأكيد إجراء أداة حساسًا، راجع الإجراء في Manus بنفسك؛ الجسر لا ينفذ الموافقة.
 
-موصل GitHub المدمج في ChatGPT يتيح قراءة المستودعات المصرّح بها فقط. لا يستطيع وحده إرسال مهمة أو دفع تعديلات. أداة ChatGPT التي تستدعي هذا الجسر هي قناة الكتابة؛ وموصل GitHub في Manus هو قناة وصول الوكيل إلى المستودع. صلاحيات ChatGPT والخطط لا يمكن فحصها من جلسة Manus، ويجب اختبار ظهور خيار Actions/MCP داخل حسابك.
+موصل GitHub المدمج في ChatGPT يتيح قراءة المستودعات المصرّح بها فقط. لا يستطيع وحده إرسال مهمة أو دفع تعديلات. أداة ChatGPT التي تستدعي هذا الجسر هي قناة الكتابة؛ وموصل GitHub في Manus هو قناة وصول الوكيل إلى المستودع. توضح وثائق OpenAI الحالية أن الحسابات الشخصية Free/Go/Plus/Pro لا تنشئ GPTs جديدة؛ يتطلب إعداد Action الوصول إلى محرر GPT ضمن مساحة Business/Enterprise/Edu مؤهلة وصلاحيات تسمح بذلك. لذا ملف OpenAPI هنا جاهز للاستيراد لاحقًا، لكنه لا يعني أن ChatGPT متصل الآن. راجع [تكوين Actions](https://help.openai.com/en/articles/9442513-configuring-actions-in-gpts) و[أهلية إنشاء GPTs](https://help.openai.com/en/articles/8554397-creating-and-editing-gpts).
 
 ## توصيل backend الخاص بـNADA AI
 
