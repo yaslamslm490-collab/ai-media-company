@@ -1,0 +1,168 @@
+openapi: 3.0.3
+info:
+  title: NADA AI — Manus Task Bridge
+  version: 1.0.0
+  description: >-
+    Private bridge for submitting tasks to Manus API v2, reading webhook-backed
+    results, and continuing a task that is waiting for user input.
+servers:
+  - url: https://bridge.example.com
+    description: Replace with the deployed bridge's public HTTPS origin.
+security:
+  - BridgeBearer: []
+paths:
+  /v1/tasks:
+    post:
+      operationId: submitManusTask
+      summary: Submit a private task to Manus
+      description: >-
+        Submit a clear task for the NADA AI / AI Media Company project. The bridge
+        creates a private Manus task and returns its task_id and task_url. Do not
+        include passwords, API keys, or access tokens in prompt text.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [prompt]
+              properties:
+                prompt:
+                  type: string
+                  minLength: 1
+                  maxLength: 18000
+                  description: Task instructions for the Manus agent.
+                title:
+                  type: string
+                  maxLength: 120
+                  description: Optional short task title.
+      responses:
+        '202':
+          description: Task accepted by Manus.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskAccepted'
+        '400':
+          description: Invalid request.
+        '401':
+          description: Missing or invalid bridge token.
+        '502':
+          description: Manus API request failed.
+        '503':
+          description: Bridge or Manus API is not configured.
+  /v1/tasks/{task_id}:
+    get:
+      operationId: getManusTaskResult
+      summary: Read task status and webhook-delivered result
+      description: >-
+        Read task status, result text, attachments, or structured output. Repeat
+        while status is running, running_background, stopped_unverified, or
+        completion_unknown. A waiting_for_input status requires a user response;
+        never confirm a consequential action automatically.
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current status and last result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResult'
+        '401':
+          description: Missing or invalid bridge token.
+        '404':
+          description: Task is not registered in the bridge.
+        '502':
+          description: Manus API status check failed.
+  /v1/tasks/{task_id}/messages:
+    post:
+      operationId: sendManusFollowup
+      summary: Send a follow-up message to a Manus task
+      description: >-
+        Continue a task or answer a normal agent question. This endpoint sends
+        ordinary message content only. It does not approve Manus tool actions.
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  minLength: 1
+                  maxLength: 8000
+      responses:
+        '202':
+          description: Follow-up accepted.
+        '400':
+          description: Invalid message.
+        '401':
+          description: Missing or invalid bridge token.
+        '502':
+          description: Manus API request failed.
+components:
+  securitySchemes:
+    BridgeBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: token
+      description: BRIDGE_API_TOKEN configured on the bridge host. Never use MANUS_API_KEY here.
+  schemas:
+    TaskAccepted:
+      type: object
+      required: [task_id, status]
+      properties:
+        task_id:
+          type: string
+        task_title:
+          type: string
+        task_url:
+          type: string
+          format: uri
+        status:
+          type: string
+          enum: [running]
+    TaskResult:
+      type: object
+      required: [task_id, status]
+      properties:
+        task_id:
+          type: string
+        title:
+          type: string
+        task_url:
+          type: string
+          format: uri
+        status:
+          type: string
+          enum: [running, running_background, stopped_unverified, completion_unknown, waiting_for_input, completed, failed]
+        stop_reason:
+          type: string
+        message:
+          type: string
+        attachments:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        structured_output:
+          nullable: true
+        last_event_id:
+          type: string
+        updated_at:
+          type: string
