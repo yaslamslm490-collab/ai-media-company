@@ -754,8 +754,8 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 self._send_json(413 if length > MAX_BODY else 400, {"error": {"code": "invalid_body_size", "message": "حجم الطلب غير صالح."}})
                 return
             raw = self.rfile.read(length)
-            base = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
-            if not base.startswith("https://"):
+            base = collaboration.public_origin()
+            if not base:
                 self._send_json(503, {"error": {"code": "public_https_url_required", "message": "عنوان HTTPS العام غير مهيأ."}})
                 return
             full_url = base + self.path
