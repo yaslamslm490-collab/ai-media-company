@@ -171,6 +171,35 @@ class Store:
                 )""")
                 db.execute("CREATE INDEX IF NOT EXISTS execution_reports_started_idx ON execution_reports(started_at DESC)")
                 record_migration(db, "003-execution-reports", utc_now())
+            if not migration_applied(db, "004-collaboration-v1"):
+                db.execute("""CREATE TABLE IF NOT EXISTS collaboration_links (
+                    task_id VARCHAR(80) NOT NULL,
+                    provider VARCHAR(20) NOT NULL,
+                    external_task_id VARCHAR(80) NOT NULL,
+                    external_task_url VARCHAR(1000) NOT NULL DEFAULT '',
+                    status VARCHAR(30) NOT NULL DEFAULT 'running',
+                    created_at VARCHAR(40) NOT NULL,
+                    updated_at VARCHAR(40) NOT NULL,
+                    PRIMARY KEY(task_id, provider),
+                    UNIQUE(provider, external_task_id)
+                )""")
+                db.execute("""CREATE TABLE IF NOT EXISTS collaboration_updates (
+                    id VARCHAR(64) PRIMARY KEY,
+                    task_id VARCHAR(80) NOT NULL,
+                    provider VARCHAR(20) NOT NULL,
+                    status VARCHAR(30) NOT NULL DEFAULT 'NOTE',
+                    content TEXT NOT NULL,
+                    external_ref VARCHAR(200) NOT NULL DEFAULT '',
+                    created_at VARCHAR(40) NOT NULL
+                )""")
+                db.execute("CREATE INDEX IF NOT EXISTS collaboration_updates_task_idx ON collaboration_updates(task_id, created_at DESC)")
+                db.execute("""CREATE TABLE IF NOT EXISTS collaboration_webhook_events (
+                    event_id VARCHAR(200) PRIMARY KEY,
+                    external_task_id VARCHAR(80) NOT NULL,
+                    event_type VARCHAR(40) NOT NULL,
+                    received_at VARCHAR(40) NOT NULL
+                )""")
+                record_migration(db, "004-collaboration-v1", utc_now())
 
     def ping(self) -> bool:
         with self.connect() as db:
@@ -295,6 +324,73 @@ class Store:
         with self.connect() as db:
             rows = db.execute(f"SELECT * FROM tasks{where} ORDER BY created_at DESC LIMIT ?", (*params, limit)).fetchall()
         return [dict(row) for row in rows]
+
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        return dict(row) if row else None
+
+    def add_collaboration_update(self, task_id: str, provider: str, status: str,
+                                 content: str, external_ref: str = "") -> dict[str, Any]:
+        import hashlib
+        ref = external_ref or new_id()
+        update_id = hashlib.sha256(f"{provider}:{ref}".encode("utf-8")).hexdigest()
+        now = utc_now()
+        with self.connect() as db:
+            inserted = db.execute("""INSERT OR IGNORE INTO collaboration_updates
+                (id,task_id,provider,status,content,external_ref,created_at)
+                VALUES (?,?,?,?,?,?,?)""", (update_id, task_id, provider, status, content, ref, now)).rowcount > 0
+            row = db.execute("SELECT * FROM collaboration_updates WHERE id=?", (update_id,)).fetchone()
+            if row is None:
+                raise RuntimeError("collaboration_update_not_persisted")
+            if inserted:
+                self.log_activity(db, actor=provider, action="collaboration.update_saved", module="collaboration",
+                                  object_type="task", object_id=task_id,
+                                  result=json.dumps({"provider": provider, "status": status}, ensure_ascii=False))
+        return dict(row)
+
+    def list_collaboration_updates(self, task_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM collaboration_updates WHERE task_id=? ORDER BY created_at DESC LIMIT ?",
+                              (task_id, min(max(int(limit), 1), 100))).fetchall()
+        return [dict(row) for row in rows]
+
+    def link_collaboration_task(self, task_id: str, provider: str, external_task_id: str,
+                                external_task_url: str, status: str) -> dict[str, Any]:
+        now = utc_now()
+        with self.connect() as db:
+            db.execute("""INSERT INTO collaboration_links
+                (task_id,provider,external_task_id,external_task_url,status,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?)""", (task_id, provider, external_task_id, external_task_url, status, now, now))
+            row = db.execute("SELECT * FROM collaboration_links WHERE task_id=? AND provider=?", (task_id, provider)).fetchone()
+        return dict(row)
+
+    def get_collaboration_link(self, task_id: str, provider: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM collaboration_links WHERE task_id=? AND provider=?", (task_id, provider)).fetchone()
+        return dict(row) if row else None
+
+    def get_collaboration_link_by_external(self, provider: str, external_task_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM collaboration_links WHERE provider=? AND external_task_id=?",
+                              (provider, external_task_id)).fetchone()
+        return dict(row) if row else None
+
+    def update_collaboration_link(self, task_id: str, provider: str, status: str) -> dict[str, Any] | None:
+        now = utc_now()
+        with self.connect() as db:
+            db.execute("UPDATE collaboration_links SET status=?,updated_at=? WHERE task_id=? AND provider=?",
+                       (status[:30], now, task_id, provider))
+            row = db.execute("SELECT * FROM collaboration_links WHERE task_id=? AND provider=?", (task_id, provider)).fetchone()
+        return dict(row) if row else None
+
+    def record_collaboration_webhook_event(self, event_id: str, external_task_id: str,
+                                           event_type: str) -> bool:
+        with self.connect() as db:
+            cursor = db.execute("""INSERT OR IGNORE INTO collaboration_webhook_events
+                (event_id,external_task_id,event_type,received_at) VALUES (?,?,?,?)""",
+                (event_id[:200], external_task_id[:80], event_type[:40], utc_now()))
+        return cursor.rowcount > 0
 
     def count_tasks(self) -> dict[str, int]:
         counts = {status: 0 for status in sorted(TASK_STATUSES)}

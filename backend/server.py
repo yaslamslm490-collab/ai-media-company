@@ -11,6 +11,7 @@ import sys
 import subprocess
 import shutil
 import tarfile
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -40,6 +41,7 @@ from backend.store import (
 )
 from backend.integrations import IntegrationProblem, IntegrationStore
 from backend.media_generators import MediaGenerator
+from backend.collaboration import Collaboration, MCP_PATH, MANUS_WEBHOOK_PATH, MCPProblem, handle_mcp
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_BODY = 1_000_000
@@ -341,6 +343,7 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
     integration_store = IntegrationStore(store)
     integration_store.initialize()
     media_generator = MediaGenerator(integration_store)
+    collaboration = Collaboration(store)
 
     class Handler(SimpleHTTPRequestHandler):
         server_version = "AI-Media-OS/1.0"
@@ -537,10 +540,81 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                     self.wfile.write(file.read())
 
         def do_POST(self) -> None:
-            if self._api():
+            path = urllib.parse.urlsplit(self.path).path
+            if path == MCP_PATH:
+                self._handle_mcp()
+            elif path == MANUS_WEBHOOK_PATH:
+                self._handle_manus_webhook()
+            elif self._api():
                 self._run(self._post_api)
             else:
                 self._send_json(404, {"error": {"code": "not_found", "message": "المسار غير موجود."}})
+
+        def _handle_mcp(self) -> None:
+            try:
+                payload = self._read_json()
+                status, response = handle_mcp(payload, self.headers.get("Authorization", ""), collaboration)
+                if response is None:
+                    self.send_response(status)
+                    self.send_header("Content-Length", "0")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    return
+                raw = json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("MCP-Protocol-Version", "2025-03-26")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(raw)
+            except MCPProblem as problem:
+                raw = json.dumps({"error": {"code": "mcp_unavailable" if problem.status == 503 else "unauthorized",
+                                             "message": problem.message}}, separators=(",", ":")).encode()
+                self.send_response(problem.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(raw)
+            except ApiProblem as problem:
+                self._send_json(problem.status, {"error": {"code": problem.code, "message": problem.message}})
+
+        def _handle_manus_webhook(self) -> None:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._send_json(400, {"error": {"code": "invalid_content_length", "message": "حجم الطلب غير صالح."}})
+                return
+            if length <= 0 or length > MAX_BODY:
+                self._send_json(413 if length > MAX_BODY else 400, {"error": {"code": "invalid_body_size", "message": "حجم الطلب غير صالح."}})
+                return
+            raw = self.rfile.read(length)
+            base = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+            if not base.startswith("https://"):
+                self._send_json(503, {"error": {"code": "public_https_url_required", "message": "عنوان HTTPS العام غير مهيأ."}})
+                return
+            full_url = base + self.path
+            valid = collaboration.verify_webhook(raw, self.headers.get("X-Webhook-Signature", ""),
+                                                self.headers.get("X-Webhook-Timestamp", ""), full_url)
+            if not valid:
+                self._send_json(401, {"error": {"code": "invalid_webhook_signature", "message": "توقيع Webhook غير صالح."}})
+                return
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("invalid_webhook_payload")
+                result = collaboration.receive_webhook(payload)
+                self._send_json(200, result)
+                if result.get("linked") and payload.get("event_type") == "task_stopped":
+                    detail = payload.get("task_detail", {})
+                    remote_id = detail.get("task_id") if isinstance(detail, dict) else None
+                    link = store.get_collaboration_link_by_external("manus", remote_id) if isinstance(remote_id, str) else None
+                    if link:
+                        threading.Thread(target=collaboration.sync_manus, args=(link["task_id"],), daemon=True).start()
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                self._send_json(400, {"error": {"code": "invalid_webhook_payload", "message": "محتوى Webhook غير صالح."}})
 
         def do_PATCH(self) -> None:
             if self._api():
@@ -563,13 +637,18 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
         def _get_api(self) -> dict[str, Any]:
             path = urllib.parse.urlsplit(self.path).path
             if path == "/api/health":
-                return system_health(store, token)
+                health = system_health(store, token)
+                health["checks"]["collaboration"] = collaboration.status()
+                return health
+            if path == "/api/collaboration/status":
+                return {"collaboration": collaboration.status()}
             if path == "/api/modules":
                 return {"modules": module_catalog(store, token), "builder_capabilities": BUILDER_CAPABILITIES}
             self._authenticate()
             query = self._query()
             if path == "/api/dashboard":
                 health = system_health(store, token)
+                health["checks"]["collaboration"] = collaboration.status()
                 dashboard = store.dashboard(health)
                 dashboard["company_builder"] = company_store.summary()
                 return dashboard
@@ -643,6 +722,12 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 except ValueError as error:
                     raise ApiProblem(400, "invalid_limit", "حد النتائج غير صالح.") from error
                 return {"tasks": store.list_tasks(status=status, search=query.get("q", "")[:120], limit=limit), "statuses": sorted(TASK_STATUSES)}
+            task_updates_match = re.fullmatch(r"/api/tasks/([A-Za-z0-9_-]{1,80})/updates", path)
+            if task_updates_match:
+                task_id = task_updates_match.group(1)
+                if store.get_task(task_id) is None:
+                    raise ApiProblem(404, "task_not_found", "المهمة غير موجودة.")
+                return {"updates": collaboration.task_updates(task_id, 100)}
             if path == "/api/pages":
                 try:
                     limit = min(max(int(query.get("limit", "100")), 1), 500)
@@ -991,6 +1076,15 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                                           "deadline": _bounded_text(payload, "deadline", maximum=40),
                                           "approval_required": _as_bool(payload.get("approval_required"))}, actor)
                 self._send_json(201, {"task": task})
+                return None
+            task_update_match = re.fullmatch(r"/api/tasks/([A-Za-z0-9_-]{1,80})/updates", path)
+            if task_update_match:
+                update = collaboration.add_update(
+                    task_update_match.group(1),
+                    _bounded_text(payload, "content", required=True, maximum=50000),
+                    "owner", _bounded_text(payload, "status", maximum=30).upper() or "NOTE",
+                )
+                self._send_json(201, {"update": update})
                 return None
             if path == "/api/approvals":
                 title = _bounded_text(payload, "title", required=True, maximum=180)

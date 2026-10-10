@@ -134,9 +134,9 @@ function renderHealth() {
 }
 function healthCards(health) {
   if (!health) return '<div class="empty-state"><strong>حالة الصحة غير متاحة</strong>تعذّر الحصول على نتيجة الفحص.</div>';
-  const names = {backend: 'الخادم الخلفي', database: 'قاعدة البيانات', authentication: 'مصادقة المالك', media_vault: 'خزنة مفاتيح الوسائط', object_storage: 'التخزين الدائم', ai_router: 'AI Router', manus: 'Manus', github: 'GitHub', external_integrations: 'التكاملات الخارجية'};
-  const entries = Object.entries(health.checks).filter(([key]) => key !== 'database_engine').flatMap(([key, value]) => value && typeof value === 'object' ? Object.entries(value).map(([name, status]) => [`${names[key]} · ${name}`, status]) : [[names[key] || key, value]]);
-  return `<div class="health-grid">${entries.map(([name, status]) => `<article class="panel health-card"><div class="health-card-top"><span class="health-indicator ${statusClass(status)}"></span><span class="health-card-name">${esc(name)}</span>${statusBadge(status)}</div><p>${esc(status === 'ONLINE' ? 'نجح الفحص الفعلي لهذا المكوّن.' : status === 'OFFLINE' ? 'فشل الاتصال عند آخر فحص.' : status === 'ERROR' ? 'أبلغ الفحص عن خطأ.' : 'لا يوجد إعداد أو تكامل لهذا المكوّن حتى الآن.')}</p></article>`).join('')}</div><p class="panel-caption health-timestamp">آخر فحص: ${esc(formatDate(health.checked_at))}</p>`;
+  const names = {backend: 'الخادم الخلفي', database: 'قاعدة البيانات', authentication: 'مصادقة المالك', media_vault: 'خزنة مفاتيح الوسائط', object_storage: 'التخزين الدائم', ai_router: 'AI Router', manus: 'Manus', github: 'GitHub', external_integrations: 'التكاملات الخارجية', application_tasks: 'قاعدة مهام NADA AI', manus_api: 'تهيئة Manus API', mcp_endpoint: 'تهيئة عميل MCP', public_https: 'عنوان HTTPS لـWebhook'};
+  const entries = Object.entries(health.checks).filter(([key]) => key !== 'database_engine').flatMap(([key, value]) => value && typeof value === 'object' ? Object.entries(value).map(([name, status]) => [names[name] || `${names[key] || key} · ${name}`, status]) : [[names[key] || key, value]]);
+  return `<div class="health-grid">${entries.map(([name, status]) => `<article class="panel health-card"><div class="health-card-top"><span class="health-indicator ${statusClass(status)}"></span><span class="health-card-name">${esc(name)}</span>${statusBadge(status)}</div><p>${esc(status === 'ONLINE' ? 'نجح الفحص الفعلي لهذا المكوّن.' : status === 'OFFLINE' ? 'فشل الاتصال عند آخر فحص.' : status === 'ERROR' ? 'أبلغ الفحص عن خطأ.' : status === 'CONFIGURED' ? 'الإعداد موجود، لكن لم ينجح اختبار اتصال حي بعد.' : 'لا يوجد إعداد أو تكامل لهذا المكوّن حتى الآن.')}</p></article>`).join('')}</div><p class="panel-caption health-timestamp">آخر فحص: ${esc(formatDate(health.checked_at))}</p>`;
 }
 function emptyState(title, detail) {
   return `<div class="empty-state"><strong>${esc(title)}</strong>${esc(detail)}</div>`;
@@ -177,7 +177,7 @@ function activityRows(items) {
 function taskTable(items) {
   if (!items.length) return emptyState('لا توجد مهام', 'أضف مهمة للبدء؛ ستُحفظ في SQLite وتظهر في سجل النشاط.');
   const statuses = ['TODO', 'IN_PROGRESS', 'WAITING_APPROVAL', 'COMPLETED', 'CANCELLED', 'FAILED'];
-  return `<div class="table-wrap"><table class="content-table task-table"><thead><tr><th>ID</th><th>المهمة</th><th>المالك</th><th>موظف AI</th><th>القسم</th><th>الأولوية</th><th>الحالة</th><th>أُنشئت</th><th>حُدّثت</th></tr></thead><tbody>${items.map((task) => `<tr><td><code title="${esc(task.id)}">${esc(task.id.slice(0, 8))}</code></td><td><div class="content-main-title">${esc(task.title)}</div><div class="content-subtitle">${esc(task.description || '—')}</div></td><td>${esc(task.owner)}</td><td>${esc(task.assigned_employee || '—')}</td><td>${esc(task.department || '—')}</td><td>${statusBadge(task.priority)}</td><td><select class="select-pill task-status-select" data-task-id="${esc(task.id)}">${statuses.map((status) => `<option value="${status}" ${task.status === status ? 'selected' : ''}>${esc(label(status))}</option>`).join('')}</select></td><td>${esc(formatDate(task.created_at, false))}</td><td>${esc(formatDate(task.updated_at, false))}</td></tr>`).join('')}</tbody></table></div>`;
+  return `<div class="table-wrap"><table class="content-table task-table"><thead><tr><th>ID</th><th>المهمة</th><th>المالك</th><th>موظف AI</th><th>القسم</th><th>الأولوية</th><th>الحالة</th><th>أُنشئت</th><th>حُدّثت</th><th>سجل التعاون</th></tr></thead><tbody>${items.map((task) => `<tr><td><code title="${esc(task.id)}">${esc(task.id.slice(0, 8))}</code></td><td><div class="content-main-title">${esc(task.title)}</div><div class="content-subtitle">${esc(task.description || '—')}</div></td><td>${esc(task.owner)}</td><td>${esc(task.assigned_employee || '—')}</td><td>${esc(task.department || '—')}</td><td>${statusBadge(task.priority)}</td><td><select class="select-pill task-status-select" data-task-id="${esc(task.id)}">${statuses.map((status) => `<option value="${status}" ${task.status === status ? 'selected' : ''}>${esc(label(status))}</option>`).join('')}</select></td><td>${esc(formatDate(task.created_at, false))}</td><td>${esc(formatDate(task.updated_at, false))}</td><td><details><summary>عرض السجل</summary><button class="button button-quiet small-button" type="button" data-task-updates>تحميل</button><div class="task-updates" aria-live="polite"></div></details></td></tr>`).join('')}</tbody></table></div>`;
 }
 function approvalList(items) {
   if (!items.length) return emptyState('لا توجد طلبات موافقة', 'عند إنشاء طلبات المراجعة أو ربط وحدة الإنتاج ستظهر هنا.');
@@ -543,6 +543,21 @@ function bindPageEvents() {
     select.disabled = true;
     try { await api.updateTask(select.dataset.taskId, {status: select.value}); toast('تم حفظ حالة المهمة في قاعدة البيانات.'); if (state.page === 'tasks') await renderPage('tasks'); else if (state.page === 'dashboard') await renderPage('dashboard'); }
     catch (error) { toast(apiFailure(error), 'error'); if (state.page === 'tasks') await renderPage('tasks'); }
+  }));
+  $$('[data-task-updates]').forEach((button) => button.addEventListener('click', async () => {
+    const taskId = button.closest('tr')?.querySelector('.task-status-select')?.dataset.taskId;
+    const target = button.parentElement.querySelector('.task-updates');
+    if (!taskId || !target) return;
+    button.disabled = true;
+    button.textContent = 'جارٍ التحميل…';
+    try {
+      const {updates = []} = await api.taskUpdates(taskId);
+      target.innerHTML = updates.length ? updates.slice().reverse().map((item) => `<article class="content-list-item"><strong>${esc(item.provider)} · ${esc(item.status)}</strong><p>${esc(item.content)}</p><small>${esc(formatDate(item.created_at))}</small></article>`).join('') : '<p class="panel-caption">لا توجد تحديثات محفوظة لهذه المهمة بعد.</p>';
+      button.textContent = 'تحديث السجل';
+    } catch (error) {
+      target.textContent = apiFailure(error);
+      button.textContent = 'إعادة المحاولة';
+    } finally { button.disabled = false; }
   }));
   $$('[data-approval-decision]').forEach((button) => button.addEventListener('click', () => {
     const decision = button.dataset.approvalDecision;

@@ -78,6 +78,7 @@ export const api = {
   restoreExecutionReport: (id) => request(`/execution-reports/${id}/restore`, {method: 'POST', body: {confirm: true}}),
   company: () => request('/company'),
   tasks: (query = {}) => request('/tasks', {query}),
+  taskUpdates: (id) => request(`/tasks/${encodeURIComponent(id)}/updates`),
   createTask: (body) => request('/tasks', {method: 'POST', body}),
   updateTask: (id, body) => request(`/tasks/${encodeURIComponent(id)}`, {method: 'PATCH', body}),
   approvals: (query = {}) => request('/approvals', {query}),

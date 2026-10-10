@@ -14,6 +14,7 @@
 - سجل النشاط يسجل تغييرات Company Builder والمهام ونتيجة اختبار النموذج دون تخزين نص prompt أو استجابة AI أو مفاتيح اعتماد.
 - الصفحة الرئيسية وملخص Company Builder يعرضان إحصاءات مشتقة من قاعدة البيانات، لا أرقاماً ثابتة. بيانات البداية تُنشأ اختيارياً فقط بأمر seed المتكرر بأمان.
 - يبقى **Manus محرك التطوير/التنفيذ الخارجي**، لا يُنشأ كموظف AI داخل الشركة.
+- أصبح مركز المهام الحالي أيضًا سجل التعاون: روابط Manus والنتائج تحفظ في قاعدة التطبيق نفسها، ويُتاح تكامل MCP مدمج من مسار الخادم `/mcp` دون قاعدة Bridge مستقلة. راجع [إعداد التعاون](docs/collaboration.md)؛ لم يُختبر اتصال Manus الحي أو ChatGPT من هذه البيئة.
 
 ## التشغيل والبناء
 
@@ -58,6 +59,7 @@ python3 -m backend.seed
 
 - **AI Router:** `AI_ROUTER_BASE_URL` و`AI_ROUTER_API_KEY`، واختيارياً `AI_ROUTER_MODEL` أو `AI_ROUTER_CHAT_COMPLETIONS_URL`. يقبل أيضاً إعداد `OPENAI_API_BASE` و`OPENAI_API_KEY` المتوافق القديم. يُفحص `/models` وتُستدعى `/chat/completions` عند اختبار موظف.
 - **Manus:** `MANUS_API_KEY` أو `MANUS_API_TOKEN`، مع فحص محدود عبر `GET /v2/task.list?limit=1`. لا تُعرض الحالة متصلة دون مفتاح صالح واستجابة ناجحة؛ إدارة الشركة لا تستخدم Manus كموظف داخلي.
+- **التعاون المدمج:** عيّن `NADA_MCP_TOKEN` و`MANUS_API_KEY` و`PUBLIC_BASE_URL` في مدير أسرار المضيف، لا في Git. يقبل `/mcp` طلبات MCP الموثقة، ويرسل مهامًا خاصة إلى Manus ويحفظ النتائج في جداول `tasks` و`collaboration_*`.
 - **GitHub:** اعتماد مضيف `gh` عند تفعيل `GITHUB_USE_CLI=true`، أو `GITHUB_TOKEN` و`GITHUB_HEALTH_URL`. سحب/دفع المستودع أثناء التطوير لا يعني تلقائياً أن تكامل التطبيق نفسه متصل.
 - **فحوص اختيارية أخرى:** `AI_ROUTER_HEALTH_URL` و`MANUS_HEALTH_URL` و`GITHUB_HEALTH_URL` و`EXTERNAL_HEALTH_URLS`.
 

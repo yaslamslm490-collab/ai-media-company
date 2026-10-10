@@ -1,4 +1,6 @@
-# NADA AI — جسر ChatGPT ↔ Manus
+# NADA AI — Bridge منفصل قديم (غير مستخدم)
+
+> **تنبيه:** هذا المجلد محفوظ مؤقتًا للتوافق والمرجعية فقط؛ لا تنشر هذه الخدمة ولا تنشئ قاعدة بيانات Bridge جديدة. مسار التعاون المعتمد الآن مدمج في خادم التطبيق وقاعدة NADA AI (`backend/collaboration.py`, `/mcp`, وجداول `collaboration_links` و`collaboration_updates`). راجع [تعليمات التعاون المدمج](../docs/collaboration.md). لم تُحذف ملفات Bridge أو بياناته، ولم تُنقل أي بيانات تلقائيًا.
 
 هذه خدمة وسيطة صغيرة تربط **ChatGPT Actions** بـ **Manus API v2**. تستقبل المهمة من ChatGPT عبر HTTPS مع Bearer token خاص بالجسر، تنشئ مهمة Manus خاصة، وتحفظ النتيجة الواردة عبر Manus Webhooks بعد التحقق من توقيع RSA-SHA256. تبقى `MANUS_API_KEY` على الخادم فقط؛ لا توضع في ChatGPT أو ملفات Git.
 
