@@ -7,7 +7,8 @@ services:
     branch: main
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    autoDeployTrigger: commit
+    # Keep the service dormant after creation; deployments require an explicit manual action.
+    autoDeployTrigger: 'off'
     healthCheckPath: /api/health
     disk:
       name: nada-ai-data
