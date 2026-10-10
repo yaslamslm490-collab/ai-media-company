@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from backend.company_builder import _reject_secret_material
+from backend.oauth import required_scopes
 from backend.store import TASK_PRIORITIES, TASK_STATUSES, Store, new_id
 
 MCP_PROTOCOL_VERSION = "2025-03-26"
@@ -214,7 +215,7 @@ class Collaboration:
                 "task_status": local_status, "result_saved": bool(latest_result), "link": updated_link}
 
     def _webhook_url(self) -> str:
-        base = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+        base = (os.environ.get("PUBLIC_BASE_URL", "").strip() or os.environ.get("RENDER_EXTERNAL_URL", "").strip()).rstrip("/")
         parsed = urllib.parse.urlsplit(base)
         if parsed.scheme != "https" or not parsed.netloc or parsed.path or parsed.query or parsed.fragment:
             return ""
@@ -334,14 +335,17 @@ class MCPProblem(Exception):
         self.message = message
 
 
-def handle_mcp(payload: dict[str, Any], authorization: str, service: Collaboration) -> tuple[int, dict[str, Any] | None]:
+def handle_mcp(payload: dict[str, Any], authorization: str, service: Collaboration,
+               *, granted_scopes: set[str] | None = None) -> tuple[int, dict[str, Any] | None]:
     """Stateless MCP Streamable HTTP JSON request handler."""
-    expected = os.environ.get("NADA_MCP_TOKEN", "").strip()
-    if len(expected) < 32:
-        raise MCPProblem(503, "The embedded MCP endpoint is not configured.")
-    supplied = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-    if not supplied or not hmac.compare_digest(supplied.encode(), expected.encode()):
-        raise MCPProblem(401, "Authentication is required.")
+    if granted_scopes is None:
+        expected = os.environ.get("NADA_MCP_TOKEN", "").strip()
+        if len(expected) < 32:
+            raise MCPProblem(503, "The embedded MCP endpoint is not configured.")
+        supplied = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+        if not supplied or not hmac.compare_digest(supplied.encode(), expected.encode()):
+            raise MCPProblem(401, "Authentication is required.")
+        granted_scopes = {"*"}
     method = payload.get("method")
     request_id = payload.get("id")
     if not isinstance(method, str):
@@ -355,11 +359,19 @@ def handle_mcp(payload: dict[str, Any], authorization: str, service: Collaborati
     elif method == "ping":
         result = {}
     elif method == "tools/list":
+        if "*" not in granted_scopes and "tasks:read" not in granted_scopes:
+            return 403, {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32003, "message": "Insufficient scope: tasks:read"}}
+        # Advertise available tools; every call still enforces its own scope and can trigger step-up OAuth.
         result = {"tools": TOOLS}
     elif method == "tools/call":
         params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
         name = params.get("name")
         args = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+        required = required_scopes(str(name or ""))
+        if required and "*" not in granted_scopes and not required.issubset(granted_scopes):
+            requested = " ".join(sorted(required - granted_scopes))
+            return 403, {"jsonrpc": "2.0", "id": request_id,
+                         "error": {"code": -32003, "message": "Insufficient scope: " + requested}}
         try:
             value = _call_tool(service, str(name or ""), args)
             result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}], "structuredContent": value, "isError": False}

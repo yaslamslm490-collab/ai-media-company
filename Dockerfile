@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     REQUIRE_DATABASE_URL=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home --home-dir /home/app app
 
@@ -19,9 +19,12 @@ COPY --chown=app:app backend ./backend
 COPY --chown=app:app frontend ./frontend
 COPY --chown=app:app scripts/build.py ./scripts/build.py
 COPY --chown=app:app index.html styles.css manus-routes.json app.js ./
+COPY --chown=root:root scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN python3 scripts/build.py \
-    && chown -R app:app /app
+    && chown -R app:app /app \
+    && chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
-USER app
+USER root
 EXPOSE 3000
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["python3", "-m", "backend.server"]

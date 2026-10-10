@@ -11,7 +11,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request(path, {method = 'GET', body, publicEndpoint = false, query = {}, timeoutMs = 0} = {}) {
+async function request(path, {method = 'GET', body, publicEndpoint = false, query = {}, timeoutMs = 0, timeoutMessage = ''} = {}) {
   const url = new URL(`${API_ROOT}${path}`, window.location.origin);
   Object.entries(query).forEach(([key, value]) => {
     if (value !== undefined && value !== null && String(value).trim() !== '') url.searchParams.set(key, String(value));
@@ -36,7 +36,7 @@ async function request(path, {method = 'GET', body, publicEndpoint = false, quer
   } catch (error) {
     if (error instanceof ApiError) throw error;
     if (controller?.signal.aborted || error?.name === 'AbortError') {
-      throw new ApiError('انتهت مهلة فحص الخادم وقاعدة البيانات. أعد المحاولة بعد التحقق من الاتصال.', 0, 'request_timeout');
+      throw new ApiError(timeoutMessage || 'انتهت مهلة الطلب. أعد المحاولة بعد التحقق من الاتصال.', 0, 'request_timeout');
     }
     throw new ApiError('تعذّر الاتصال بالخادم الخلفي.', 0, 'network_error');
   } finally {
@@ -65,7 +65,7 @@ export const api = {
   get hasToken() { return Boolean(ownerToken); },
   setToken(token) { ownerToken = token.trim(); if (ownerToken) sessionStorage.setItem('ai-media-owner-token', ownerToken); else sessionStorage.removeItem('ai-media-owner-token'); },
   clearToken() { this.setToken(''); },
-  health: () => request('/health', {publicEndpoint: true, timeoutMs: 15000}),
+  health: () => request('/health', {publicEndpoint: true, timeoutMs: 15000, timeoutMessage: 'انتهت مهلة فحص الخادم وقاعدة البيانات. أعد المحاولة بعد التحقق من الاتصال.'}),
   sendCommand: (body) => request('/commands', {method: 'POST', body}),
   serviceIntegrations: () => request('/service-integrations'),
   saveServiceIntegration: (body) => request('/service-integrations', {method: 'POST', body}),
@@ -73,6 +73,7 @@ export const api = {
   resetOwnerPassword: (body) => request('/auth/reset-password', {method: 'POST', body}),
   modules: () => request('/modules', {publicEndpoint: true}),
   dashboard: () => request('/dashboard'),
+  globalSearch: (query) => request('/search', {query: {q: query}, timeoutMs: 12000, timeoutMessage: 'انتهت مهلة البحث. تحقق من اتصال الخادم ثم أعد المحاولة.'}),
   pages: () => request('/pages'),
   executionReports: () => request('/execution-reports'),
   restoreExecutionReport: (id) => request(`/execution-reports/${id}/restore`, {method: 'POST', body: {confirm: true}}),

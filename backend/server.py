@@ -42,6 +42,7 @@ from backend.store import (
 from backend.integrations import IntegrationProblem, IntegrationStore
 from backend.media_generators import MediaGenerator
 from backend.collaboration import Collaboration, MCP_PATH, MANUS_WEBHOOK_PATH, MCPProblem, handle_mcp
+from backend.oauth import OAuthError, OAuthProvider, SCOPES
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_BODY = 1_000_000
@@ -344,6 +345,7 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
     integration_store.initialize()
     media_generator = MediaGenerator(integration_store)
     collaboration = Collaboration(store)
+    oauth = OAuthProvider(store, lambda: token)
 
     class Handler(SimpleHTTPRequestHandler):
         server_version = "AI-Media-OS/1.0"
@@ -352,6 +354,9 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             super().__init__(*args, directory=str(static_root), **kwargs)
 
         def log_message(self, format: str, *args: Any) -> None:
+            log_path = urllib.parse.urlsplit(self.path).path
+            if log_path in {"/oauth/authorize", "/api/search"} and "?" in self.path:
+                args = tuple(re.sub(re.escape(log_path) + r"\?[^\s]*", log_path + "?[redacted]", str(item)) for item in args)
             sys.stderr.write("%s - %s\n" % (self.address_string(), format % args))
 
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
@@ -462,12 +467,61 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 pass
 
         def do_GET(self) -> None:
+            path = urllib.parse.urlsplit(self.path).path
+            if path in {"/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"}:
+                try:
+                    self._send_json(200, oauth.protected_resource_metadata())
+                except OAuthError as error:
+                    self._send_json(error.status, {"error": error.error, "error_description": error.description})
+                return
+            if path == "/.well-known/oauth-authorization-server":
+                try:
+                    self._send_json(200, oauth.authorization_server_metadata())
+                except OAuthError as error:
+                    self._send_json(error.status, {"error": error.error, "error_description": error.description})
+                return
+            if path == "/oauth/authorize":
+                query: dict[str, str] = {}
+                try:
+                    query = self._read_oauth_query()
+                    self._send_html(200, oauth.authorization_form(query))
+                except OAuthError as error:
+                    location = oauth.authorization_request_error_redirect(query, error)
+                    if location:
+                        self.send_response(302)
+                        self.send_header("Location", location)
+                        self.send_header("Cache-Control", "no-store")
+                        self.send_header("Referrer-Policy", "no-referrer")
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                    else:
+                        self._send_html(error.status, self._oauth_error_page(error))
+                return
             if not self._api():
                 return self._serve_static(include_body=True)
-            media_match = re.fullmatch(r"/api/external-integrations/generations/([a-f0-9]{32})/(audio|media)", urllib.parse.urlsplit(self.path).path)
+            media_match = re.fullmatch(r"/api/external-integrations/generations/([a-f0-9]{32})/(audio|media)", path)
             if media_match:
                 return self._serve_generated_media(media_match.group(1), media_match.group(2))
             self._run(self._get_api)
+
+        def _send_html(self, status: int, document: str) -> None:
+            raw = document.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+            self.end_headers()
+            self.wfile.write(raw)
+
+        @staticmethod
+        def _oauth_error_page(error: OAuthError) -> str:
+            import html
+            message = html.escape(error.description or error.error)
+            return f"<!doctype html><html lang='ar' dir='rtl'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>تعذّر الربط</title><body style='font:16px system-ui;max-width:640px;margin:10vh auto;padding:24px'><h1>تعذّر إتمام ربط MCP</h1><p>{message}</p><p>أغلق هذه النافذة وأعد المحاولة بعد تصحيح إعدادات الخادم أو بيانات OAuth.</p></body></html>"
 
         def _serve_generated_media(self, generation_id: str, media_kind: str) -> None:
             media_path: Path | None = None
@@ -541,7 +595,15 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
 
         def do_POST(self) -> None:
             path = urllib.parse.urlsplit(self.path).path
-            if path == MCP_PATH:
+            if path == "/oauth/register":
+                self._handle_oauth_register()
+            elif path == "/oauth/authorize":
+                self._handle_oauth_authorize()
+            elif path == "/oauth/token":
+                self._handle_oauth_token()
+            elif path == "/oauth/revoke":
+                self._handle_oauth_revoke()
+            elif path == MCP_PATH:
                 self._handle_mcp()
             elif path == MANUS_WEBHOOK_PATH:
                 self._handle_manus_webhook()
@@ -550,10 +612,99 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             else:
                 self._send_json(404, {"error": {"code": "not_found", "message": "المسار غير موجود."}})
 
+        def _read_oauth_form(self) -> dict[str, str]:
+            content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if content_type != "application/x-www-form-urlencoded":
+                raise OAuthError("invalid_request", "Content-Type must be application/x-www-form-urlencoded.")
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError as error:
+                raise OAuthError("invalid_request", "Invalid Content-Length.") from error
+            if length <= 0 or length > 64_000:
+                raise OAuthError("invalid_request", "The request body is empty or too large.")
+            try:
+                values = urllib.parse.parse_qsl(self.rfile.read(length).decode("utf-8"), keep_blank_values=True, max_num_fields=50)
+            except (UnicodeDecodeError, ValueError) as error:
+                raise OAuthError("invalid_request", "Invalid form body.") from error
+            form: dict[str, str] = {}
+            for key, value in values:
+                if key in form:
+                    raise OAuthError("invalid_request", "Duplicate form parameters are not accepted.")
+                form[key] = value
+            return form
+
+        def _read_oauth_query(self) -> dict[str, str]:
+            try:
+                values = urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query,
+                                               keep_blank_values=True, max_num_fields=30)
+            except ValueError as error:
+                raise OAuthError("invalid_request", "Invalid authorization request.") from error
+            query: dict[str, str] = {}
+            for key, value in values:
+                if key in query:
+                    raise OAuthError("invalid_request", "Duplicate authorization parameters are not accepted.")
+                query[key] = value
+            return query
+
+        def _handle_oauth_register(self) -> None:
+            try:
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                    raise OAuthError("invalid_request", "Content-Type must be application/json.")
+                self._send_json(201, oauth.register_client(self._read_json()))
+            except OAuthError as error:
+                self._send_json(error.status, {"error": error.error, "error_description": error.description})
+            except ApiProblem as error:
+                self._send_json(error.status, {"error": "invalid_request", "error_description": error.message})
+
+        def _handle_oauth_authorize(self) -> None:
+            try:
+                form = self._read_oauth_form()
+                location = oauth.complete_authorization(form, self.client_address[0])
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            except OAuthError as error:
+                self._send_html(error.status, self._oauth_error_page(error))
+
+        def _handle_oauth_token(self) -> None:
+            try:
+                self._send_json(200, oauth.token(self._read_oauth_form()))
+            except OAuthError as error:
+                self._send_json(error.status, {"error": error.error, "error_description": error.description})
+
+        def _handle_oauth_revoke(self) -> None:
+            try:
+                form = self._read_oauth_form()
+                oauth.revoke(form.get("client_id", ""), form.get("token", ""))
+                self._send_json(200, {})
+            except OAuthError as error:
+                self._send_json(error.status, {"error": error.error, "error_description": error.description})
+
         def _handle_mcp(self) -> None:
             try:
                 payload = self._read_json()
-                status, response = handle_mcp(payload, self.headers.get("Authorization", ""), collaboration)
+                authorization = self.headers.get("Authorization", "")
+                supplied = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+                scopes = oauth.validate_access_token(supplied)
+                if scopes is None:
+                    expected = os.environ.get("NADA_MCP_TOKEN", "").strip()
+                    legacy_valid = bool(len(expected) >= 32 and supplied and hmac.compare_digest(supplied.encode(), expected.encode()))
+                    if legacy_valid:
+                        scopes = {"*"}
+                    elif not oauth.ready and len(expected) < 32:
+                        raise MCPProblem(503, "The embedded MCP endpoint is not configured.")
+                    else:
+                        raise MCPProblem(401, "Authentication is required.")
+                status, response = handle_mcp(payload, authorization, collaboration, granted_scopes=scopes)
+                if status == 200 and response is not None and scopes != {"*"}:
+                    try:
+                        oauth.mark_access_token_used(supplied)
+                    except Exception:
+                        pass
                 if response is None:
                     self.send_response(status)
                     self.send_header("Content-Length", "0")
@@ -567,6 +718,15 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 self.send_header("MCP-Protocol-Version", "2025-03-26")
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("X-Content-Type-Options", "nosniff")
+                if status == 403:
+                    message = response.get("error", {}).get("message", "") if isinstance(response, dict) else ""
+                    requested = message.partition(":")[2].strip().split() if isinstance(message, str) else []
+                    requested = sorted({scope for scope in requested if scope in SCOPES})
+                    challenge = 'Bearer error="insufficient_scope"'
+                    if requested:
+                        challenge += ', scope="' + " ".join(requested) + '"'
+                    challenge += f', resource_metadata="{oauth.issuer}/.well-known/oauth-protected-resource"'
+                    self.send_header("WWW-Authenticate", challenge)
                 self.end_headers()
                 self.wfile.write(raw)
             except MCPProblem as problem:
@@ -576,6 +736,9 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(raw)))
                 self.send_header("Cache-Control", "no-store")
+                if problem.status == 401:
+                    metadata = oauth.issuer + "/.well-known/oauth-protected-resource" if oauth.issuer else "/.well-known/oauth-protected-resource"
+                    self.send_header("WWW-Authenticate", f'Bearer scope="tasks:read", resource_metadata="{metadata}"')
                 self.end_headers()
                 self.wfile.write(raw)
             except ApiProblem as problem:
@@ -634,21 +797,75 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             self.send_header("Content-Length", "0")
             self.end_headers()
 
+        def _collaboration_health(self) -> dict[str, Any]:
+            status = collaboration.status()
+            legacy_token = os.environ.get("NADA_MCP_TOKEN", "").strip()
+            if oauth.ready:
+                status["mcp_endpoint"] = "READY"
+                status["mcp_oauth"] = "READY"
+            elif len(legacy_token) >= 32:
+                status["mcp_endpoint"] = "CONFIGURED"
+                status["mcp_oauth"] = "NOT_CONFIGURED"
+            else:
+                status["mcp_endpoint"] = "NOT_CONFIGURED"
+                status["mcp_oauth"] = "NOT_CONFIGURED"
+            try:
+                status["mcp_client_activity"] = "ONLINE" if oauth.mcp_client_used() else "NOT_CHECKED"
+            except Exception:
+                status["mcp_client_activity"] = "NOT_CHECKED"
+            # DCR client_name is self-asserted, so it cannot prove the request came from ChatGPT.
+            status["chatgpt_connection"] = "NOT_CHECKED"
+            return status
+
         def _get_api(self) -> dict[str, Any]:
             path = urllib.parse.urlsplit(self.path).path
             if path == "/api/health":
                 health = system_health(store, token)
-                health["checks"]["collaboration"] = collaboration.status()
+                health["checks"]["collaboration"] = self._collaboration_health()
                 return health
             if path == "/api/collaboration/status":
-                return {"collaboration": collaboration.status()}
+                return {"collaboration": self._collaboration_health()}
             if path == "/api/modules":
                 return {"modules": module_catalog(store, token), "builder_capabilities": BUILDER_CAPABILITIES}
             self._authenticate()
             query = self._query()
+            if path == "/api/search":
+                term = str(query.get("q", "")).strip()[:120]
+                if not term:
+                    return {"query": "", "displayed_count": 0, "groups": []}
+                sources = [
+                    ("tasks", "المهام", "tasks", store.list_tasks(search=term, limit=5)),
+                    ("approvals", "الموافقات", "approvals", store.list_approvals(search=term, limit=5)),
+                    ("activity", "سجل النشاط", "activity", store.list_activity(search=term, limit=5)),
+                    ("employees", "فريق الذكاء الاصطناعي", "ai-team", company_store.list_employees(search=term)[:5]),
+                ]
+                groups: list[dict[str, Any]] = []
+                for group_id, label_text, page, records in sources:
+                    results: list[dict[str, str]] = []
+                    for row in records:
+                        if group_id == "tasks":
+                            title, subtitle, status = row.get("title"), row.get("description"), row.get("status")
+                        elif group_id == "approvals":
+                            title, subtitle, status = row.get("title"), row.get("description"), row.get("status")
+                        elif group_id == "activity":
+                            title = row.get("action") or row.get("module") or "نشاط"
+                            subtitle = " · ".join(str(value) for value in (row.get("module"), row.get("object_type"), row.get("object_id")) if value)
+                            status = row.get("status")
+                        else:
+                            title = row.get("name")
+                            subtitle = " · ".join(str(value) for value in (row.get("role"), row.get("department")) if value)
+                            status = row.get("status")
+                        results.append({
+                            "title": str(title or "").strip()[:180],
+                            "subtitle": str(subtitle or "").strip()[:180],
+                            "status": str(status or "").strip()[:48],
+                        })
+                    if results:
+                        groups.append({"id": group_id, "label": label_text, "page": page, "results": results})
+                return {"query": term, "displayed_count": sum(len(group["results"]) for group in groups), "groups": groups}
             if path == "/api/dashboard":
                 health = system_health(store, token)
-                health["checks"]["collaboration"] = collaboration.status()
+                health["checks"]["collaboration"] = self._collaboration_health()
                 dashboard = store.dashboard(health)
                 dashboard["company_builder"] = company_store.summary()
                 return dashboard

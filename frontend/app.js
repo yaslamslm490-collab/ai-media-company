@@ -31,6 +31,8 @@ const state = {
   integrationSearch: '',
   integrationProblemsOnly: false,
   integrationPage: null,
+  searchTimer: null,
+  searchRevision: 0,
   integrationSearchTimer: null,
   integrationRequestRevision: 0,
 };
@@ -62,6 +64,75 @@ async function refreshIntegrationAccountList() {
   } finally {
     if (host.isConnected) host.removeAttribute('aria-busy');
   }
+}
+
+function hideGlobalSearchPanel() {
+  const host = $('#global-search-results');
+  if (host) {
+    host.hidden = true;
+    host.setAttribute('aria-busy', 'false');
+  }
+  $('#global-search')?.setAttribute('aria-expanded', 'false');
+}
+
+function setGlobalSearchPanel(html, {busy = false} = {}) {
+  const host = $('#global-search-results');
+  if (!host) return;
+  host.hidden = false;
+  host.setAttribute('aria-busy', busy ? 'true' : 'false');
+  $('#global-search')?.setAttribute('aria-expanded', 'true');
+  host.innerHTML = html;
+}
+
+async function runGlobalSearch(query, revision) {
+  if (!query) return hideGlobalSearchPanel();
+  if (query.length < 2) {
+    setGlobalSearchPanel('<div class="global-search-state empty">أدخل حرفين على الأقل لبدء البحث.</div>');
+    return;
+  }
+  if (!state.authorized) {
+    setGlobalSearchPanel('<div class="global-search-hint">البحث في بيانات الشركة يتطلب دخول المالك.<br><button class="button button-quiet" type="button" data-search-login>دخول المالك</button></div>');
+    return;
+  }
+  setGlobalSearchPanel('<div class="global-search-state"><span class="global-search-spinner" aria-hidden="true"></span><span>جار البحث في المهام والموافقات وسجل النشاط وفريق الذكاء الاصطناعي…</span></div>', {busy: true});
+  try {
+    const response = await api.globalSearch(query);
+    if (revision !== state.searchRevision || query !== state.search) return;
+    if (!response.groups?.length) {
+      setGlobalSearchPanel(`<div class="global-search-state empty">لا توجد نتائج لعبارة «${esc(query)}».</div>`);
+      return;
+    }
+    const groups = response.groups.map((group) => `<section class="global-search-group"><h3>${esc(group.label)} (${group.results.length})</h3>${group.results.map((result) => `<button type="button" class="global-search-result" data-search-page="${esc(group.page)}"><span class="global-search-result-body"><strong>${esc(result.title)}</strong>${result.subtitle ? `<small>${esc(result.subtitle)}</small>` : ''}</span>${result.status ? `<span class="status-pill ${statusClass(result.status)}">${esc(label(result.status))}</span>` : ''}</button>`).join('')}</section>`).join('');
+    setGlobalSearchPanel(`<div class="global-search-groups">${groups}</div><div class="global-search-count">عُرضت ${Number(response.displayed_count) || 0} نتيجة مطابقة.</div>`);
+  } catch (error) {
+    if (revision !== state.searchRevision || query !== state.search) return;
+    const message = apiFailure(error);
+    const needsLogin = ['authentication_required', 'invalid_token', 'auth_not_configured'].includes(error.code);
+    setGlobalSearchPanel(`<div class="global-search-state error">${esc(message)}</div>${needsLogin ? '<div class="global-search-hint"><button class="button button-quiet" type="button" data-search-login>دخول المالك</button></div>' : '<div class="global-search-hint"><button class="button button-quiet" type="button" data-search-retry>إعادة المحاولة</button></div>'}`);
+  }
+}
+
+function scheduleGlobalSearch(value) {
+  const query = value.trim();
+  state.search = query;
+  const revision = ++state.searchRevision;
+  clearTimeout(state.searchTimer);
+  const searchablePage = ['tasks', 'approvals', 'activity', 'ai-team', 'departments'].includes(state.page);
+  if (searchablePage && state.authorized) void renderPage(state.page);
+  if (!query) {
+    hideGlobalSearchPanel();
+    return;
+  }
+  if (query.length < 2) {
+    setGlobalSearchPanel('<div class="global-search-state empty">أدخل حرفين على الأقل لبدء البحث.</div>');
+    return;
+  }
+  if (!state.authorized) {
+    setGlobalSearchPanel('<div class="global-search-hint">البحث في بيانات الشركة يتطلب دخول المالك.<br><button class="button button-quiet" type="button" data-search-login>دخول المالك</button></div>');
+    return;
+  }
+  setGlobalSearchPanel('<div class="global-search-state"><span class="global-search-spinner" aria-hidden="true"></span><span>جار بدء البحث…</span></div>', {busy: true});
+  state.searchTimer = setTimeout(() => void runGlobalSearch(query, revision), 250);
 }
 
 function statusBadge(value) {
@@ -134,9 +205,9 @@ function renderHealth() {
 }
 function healthCards(health) {
   if (!health) return '<div class="empty-state"><strong>حالة الصحة غير متاحة</strong>تعذّر الحصول على نتيجة الفحص.</div>';
-  const names = {backend: 'الخادم الخلفي', database: 'قاعدة البيانات', authentication: 'مصادقة المالك', media_vault: 'خزنة مفاتيح الوسائط', object_storage: 'التخزين الدائم', ai_router: 'AI Router', manus: 'Manus', github: 'GitHub', external_integrations: 'التكاملات الخارجية', application_tasks: 'قاعدة مهام NADA AI', manus_api: 'تهيئة Manus API', mcp_endpoint: 'تهيئة عميل MCP', public_https: 'عنوان HTTPS لـWebhook'};
+  const names = {backend: 'الخادم الخلفي', database: 'قاعدة البيانات', authentication: 'مصادقة المالك', media_vault: 'خزنة مفاتيح الوسائط', object_storage: 'التخزين الدائم', ai_router: 'AI Router', manus: 'Manus', github: 'GitHub', external_integrations: 'التكاملات الخارجية', application_tasks: 'قاعدة مهام NADA AI', manus_api: 'تهيئة Manus API', mcp_endpoint: 'نقطة MCP', mcp_oauth: 'OAuth 2.1 لخادم MCP', mcp_client_activity: 'آخر استخدام ناجح لعميل MCP', chatgpt_connection: 'اتصال ChatGPT الفعلي', public_https: 'عنوان HTTPS لـWebhook'};
   const entries = Object.entries(health.checks).filter(([key]) => key !== 'database_engine').flatMap(([key, value]) => value && typeof value === 'object' ? Object.entries(value).map(([name, status]) => [names[name] || `${names[key] || key} · ${name}`, status]) : [[names[key] || key, value]]);
-  return `<div class="health-grid">${entries.map(([name, status]) => `<article class="panel health-card"><div class="health-card-top"><span class="health-indicator ${statusClass(status)}"></span><span class="health-card-name">${esc(name)}</span>${statusBadge(status)}</div><p>${esc(status === 'ONLINE' ? 'نجح الفحص الفعلي لهذا المكوّن.' : status === 'OFFLINE' ? 'فشل الاتصال عند آخر فحص.' : status === 'ERROR' ? 'أبلغ الفحص عن خطأ.' : status === 'CONFIGURED' ? 'الإعداد موجود، لكن لم ينجح اختبار اتصال حي بعد.' : 'لا يوجد إعداد أو تكامل لهذا المكوّن حتى الآن.')}</p></article>`).join('')}</div><p class="panel-caption health-timestamp">آخر فحص: ${esc(formatDate(health.checked_at))}</p>`;
+  return `<div class="health-grid">${entries.map(([name, status]) => `<article class="panel health-card"><div class="health-card-top"><span class="health-indicator ${statusClass(status)}"></span><span class="health-card-name">${esc(name)}</span>${statusBadge(status)}</div><p>${esc(status === 'ONLINE' ? 'نجح الفحص الفعلي لهذا المكوّن.' : status === 'OFFLINE' ? 'فشل الاتصال عند آخر فحص.' : status === 'ERROR' ? 'أبلغ الفحص عن خطأ.' : status === 'CONFIGURED' ? 'الإعداد موجود، لكن لم ينجح اختبار اتصال حي بعد.' : status === 'READY' ? 'نقطة OAuth مهيأة محليًا على الخادم؛ هذا لا يثبت ربط ChatGPT.' : status === 'NOT_CHECKED' ? (name === 'اتصال ChatGPT الفعلي' ? 'لم يُثبت اتصال ChatGPT. اسم عميل OAuth المعلن ذاتيًا لا يكفي للتحقق من الهوية.' : name === 'آخر استخدام ناجح لعميل MCP' ? 'لا يوجد طلب ناجح مرصود من عميل OAuth خلال الأيام السبعة الماضية.' : 'لم يُنفّذ أو ينجح فحص حي لهذا المكوّن بعد.') : 'لا يوجد إعداد أو تكامل لهذا المكوّن حتى الآن.')}</p></article>`).join('')}</div><p class="panel-caption health-timestamp">آخر فحص: ${esc(formatDate(health.checked_at))}</p>`;
 }
 function emptyState(title, detail) {
   return `<div class="empty-state"><strong>${esc(title)}</strong>${esc(detail)}</div>`;
@@ -594,6 +665,7 @@ function logout() {
   api.clearToken();
   state.authorized = false;
   state.dashboard = null;
+  hideGlobalSearchPanel();
   updateAuthUI();
   toast('انتهت جلسة المالك.');
   renderPage('dashboard');
@@ -767,7 +839,7 @@ $('#back-to-login').addEventListener('click', () => { $('#recovery-form').hidden
 $('#recovery-form').addEventListener('submit', async (event) => {
   event.preventDefault(); showFormError('recovery-error');
   const form = event.currentTarget; const button = event.submitter; if (button) button.disabled = true;
-  try { const values = formObject(form); await api.resetOwnerPassword(values); api.setToken(values.new_password); form.reset(); $('#recovery-form').hidden = true; $('#auth-form').hidden = false; closeModal('auth-overlay'); state.authorized = true; updateAuthUI(); toast('تمت استعادة رمز المالك وحفظه على الخادم.'); await renderPage(state.page); }
+  try { const values = formObject(form); await api.resetOwnerPassword(values); api.setToken(values.new_password); form.reset(); $('#recovery-form').hidden = true; $('#auth-form').hidden = false; closeModal('auth-overlay'); state.authorized = true; updateAuthUI(); toast('تمت استعادة رمز المالك وحفظه على الخادم.'); await renderPage(state.page); if (state.search) void runGlobalSearch(state.search, state.searchRevision); }
   catch (error) { showFormError('recovery-error', apiFailure(error)); }
   finally { if (button) button.disabled = false; }
 });
@@ -784,6 +856,7 @@ $('#auth-form').addEventListener('submit', async (event) => {
     $('#owner-token-input').value = '';
     toast('تم التحقق من صلاحية المالك.');
     await renderPage(state.page);
+    if (state.search) void runGlobalSearch(state.search, state.searchRevision);
   } catch (error) {
     api.clearToken();
     state.authorized = false;
@@ -791,7 +864,7 @@ $('#auth-form').addEventListener('submit', async (event) => {
     showFormError('auth-error', apiFailure(error));
   }
 });
-$('#clear-token-button').addEventListener('click', () => { api.clearToken(); state.authorized = false; updateAuthUI(); $('#owner-token-input').value = ''; showFormError('auth-error'); toast('تم مسح رمز الجلسة.'); });
+$('#clear-token-button').addEventListener('click', () => { api.clearToken(); state.authorized = false; hideGlobalSearchPanel(); updateAuthUI(); $('#owner-token-input').value = ''; showFormError('auth-error'); toast('تم مسح رمز الجلسة.'); });
 document.addEventListener('submit', async (event) => {
   if (event.target.id !== 'owner-password-form') return;
   event.preventDefault();
@@ -845,15 +918,34 @@ $('#decision-form').addEventListener('submit', async (event) => {
 $$('[data-close]').forEach((button) => button.addEventListener('click', () => closeModal(button.dataset.close)));
 $$('.overlay').forEach((overlay) => overlay.addEventListener('click', (event) => { if (event.target === overlay) closeModal(overlay.id); }));
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') $$('.overlay:not([hidden])').forEach((modal) => closeModal(modal.id));
+  if (event.key === 'Escape') {
+    $$('.overlay:not([hidden])').forEach((modal) => closeModal(modal.id));
+    hideGlobalSearchPanel();
+  }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); $('#global-search').focus(); }
 });
-$('#global-search').addEventListener('input', () => {
-  clearTimeout(state.searchTimer);
-  state.searchTimer = setTimeout(() => {
-    state.search = $('#global-search').value.trim();
-    if (['tasks','approvals','activity','ai-team','departments'].includes(state.page) && state.authorized) renderPage(state.page);
-  }, 250);
+$('.search-box').addEventListener('click', (event) => {
+  if (window.matchMedia('(max-width: 560px)').matches && !event.currentTarget.classList.contains('search-open')) {
+    event.preventDefault();
+    event.currentTarget.classList.add('search-open');
+    $('#global-search').focus();
+  }
+});
+$('#global-search').addEventListener('input', (event) => scheduleGlobalSearch(event.currentTarget.value));
+$('#global-search-results').addEventListener('click', (event) => {
+  if (event.target.closest('[data-search-login]')) { openModal('auth-overlay'); return; }
+  if (event.target.closest('[data-search-retry]')) { scheduleGlobalSearch($('#global-search').value); return; }
+  const result = event.target.closest('[data-search-page]');
+  if (result) {
+    hideGlobalSearchPanel();
+    void renderPage(result.dataset.searchPage);
+  }
+});
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('.search-box') && !event.target.closest('#global-search-results')) {
+    hideGlobalSearchPanel();
+    if (window.matchMedia('(max-width: 560px)').matches) $('.search-box').classList.remove('search-open');
+  }
 });
 $('#mobile-menu').addEventListener('click', () => { $('#sidebar').classList.toggle('open'); $('#mobile-scrim').classList.toggle('active', $('#sidebar').classList.contains('open')); });
 $('#mobile-scrim').addEventListener('click', () => { $('#sidebar').classList.remove('open'); $('#mobile-scrim').classList.remove('active'); });

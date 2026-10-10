@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: nada-ai-media-os
+    runtime: docker
+    plan: 1c-2g
+    region: frankfurt
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    autoDeployTrigger: commit
+    healthCheckPath: /api/health
+    disk:
+      name: nada-ai-data
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: "10000"
+      - key: REQUIRE_DATABASE_URL
+        value: "false"
+      - key: AI_MEDIA_DB_PATH
+        value: /var/data/dashboard.sqlite3
+      - key: OWNER_API_TOKEN
+        sync: false

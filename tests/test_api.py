@@ -187,6 +187,29 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(states["characters"], "READY")
         self.assertEqual(states["projects"], "READY")
 
+    def test_global_search_requires_owner_and_returns_live_database_matches(self):
+        status, payload = self.request("GET", "/api/search?q=NADA%20Search%20Regression")
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+        status, created = self.request("POST", "/api/tasks", token=self.token, body={
+            "title": "NADA Search Regression 8472", "description": "سجل اختبار محلي مؤقت.",
+            "owner": "المالك", "assigned_employee": "", "department": "الاختبار",
+            "priority": "NORMAL", "status": "TODO",
+        })
+        self.assertEqual(status, 201)
+        status, results = self.request("GET", "/api/search?q=NADA%20Search%20Regression", token=self.token)
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(results["displayed_count"], 1)
+        task_group = next(group for group in results["groups"] if group["id"] == "tasks")
+        self.assertEqual(task_group["results"][0]["title"], "NADA Search Regression 8472")
+        self.assertEqual(task_group["results"][0]["status"], "TODO")
+
+        status, empty = self.request("GET", "/api/search?q=No%20Such%20Record%209913", token=self.token)
+        self.assertEqual(status, 200)
+        self.assertEqual(empty["displayed_count"], 0)
+        self.assertEqual(empty["groups"], [])
+
     def test_task_create_transition_dashboard_and_activity_are_persisted(self):
         status, payload = self.request("POST", "/api/tasks", token=self.token, body={
             "title": "مراجعة موجز الإطلاق", "description": "اعتماد النسخة النهائية.",

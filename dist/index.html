@@ -44,7 +44,8 @@
           <div class="breadcrumb"><span>مركز التحكم</span><span class="crumb-slash">/</span><strong id="breadcrumb-current">لوحة التحكم</strong></div>
         </div>
         <div class="topbar-actions">
-          <label class="search-box" for="global-search"><span class="search-symbol">⌕</span><input id="global-search" type="search" placeholder="ابحث في الوحدة الحالية…" autocomplete="off" /><kbd>⌘ K</kbd></label>
+          <label class="search-box" for="global-search"><span class="search-symbol">⌕</span><input id="global-search" type="search" placeholder="ابحث في المهام والموافقات والفريق…" autocomplete="off" aria-controls="global-search-results" aria-expanded="false" /><kbd>⌘ K</kbd></label>
+          <div id="global-search-results" class="global-search-results" role="status" aria-live="polite" aria-atomic="false" hidden></div>
           <button class="button button-quiet owner-auth-button" id="auth-button" type="button"><span id="auth-button-icon">◇</span><span id="auth-button-label">تهيئة الوصول</span></button>
         </div>
       </header>
