@@ -11,7 +11,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request(path, {method = 'GET', body, publicEndpoint = false, query = {}} = {}) {
+async function request(path, {method = 'GET', body, publicEndpoint = false, query = {}, timeoutMs = 0} = {}) {
   const url = new URL(`${API_ROOT}${path}`, window.location.origin);
   Object.entries(query).forEach(([key, value]) => {
     if (value !== undefined && value !== null && String(value).trim() !== '') url.searchParams.set(key, String(value));
@@ -19,18 +19,29 @@ async function request(path, {method = 'GET', body, publicEndpoint = false, quer
   const headers = {Accept: 'application/json'};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (!publicEndpoint && ownerToken) headers['X-Owner-Token'] = ownerToken;
-  let response;
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  let timeoutId;
   try {
-    response = await fetch(url, {method, headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store'});
+    if (controller) timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const response = await fetch(url, {method, headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store', signal: controller?.signal});
+    const payload = await response.json().catch((error) => {
+      if (controller?.signal.aborted) throw error;
+      return {};
+    });
+    if (!response.ok) {
+      const problem = payload.error || {};
+      throw new ApiError(problem.message || `فشل الطلب (${response.status}).`, response.status, problem.code || 'request_failed', problem.details || {});
+    }
+    return payload;
   } catch (error) {
+    if (error instanceof ApiError) throw error;
+    if (controller?.signal.aborted || error?.name === 'AbortError') {
+      throw new ApiError('انتهت مهلة فحص الخادم وقاعدة البيانات. أعد المحاولة بعد التحقق من الاتصال.', 0, 'request_timeout');
+    }
     throw new ApiError('تعذّر الاتصال بالخادم الخلفي.', 0, 'network_error');
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
   }
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const problem = payload.error || {};
-    throw new ApiError(problem.message || `فشل الطلب (${response.status}).`, response.status, problem.code || 'request_failed', problem.details || {});
-  }
-  return payload;
 }
 
 async function mediaBlob(generationId, kind) {
@@ -54,7 +65,7 @@ export const api = {
   get hasToken() { return Boolean(ownerToken); },
   setToken(token) { ownerToken = token.trim(); if (ownerToken) sessionStorage.setItem('ai-media-owner-token', ownerToken); else sessionStorage.removeItem('ai-media-owner-token'); },
   clearToken() { this.setToken(''); },
-  health: () => request('/health', {publicEndpoint: true}),
+  health: () => request('/health', {publicEndpoint: true, timeoutMs: 15000}),
   sendCommand: (body) => request('/commands', {method: 'POST', body}),
   serviceIntegrations: () => request('/service-integrations'),
   saveServiceIntegration: (body) => request('/service-integrations', {method: 'POST', body}),

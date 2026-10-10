@@ -88,6 +88,15 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(payload["checks"]["manus"], "NOT_CONFIGURED")
         self.assertEqual(payload["overall"], "NOT_CONFIGURED")
 
+    def test_health_reports_database_error_when_ping_fails(self):
+        store = Store(Path(self.temp.name) / "health-db-failure.sqlite3")
+        store.initialize()
+        with patch.object(store, "ping", return_value=False):
+            health = system_health(store, self.token, environ={})
+        self.assertEqual(health["checks"]["backend"], "ONLINE")
+        self.assertEqual(health["checks"]["database"], "ERROR")
+        self.assertEqual(health["overall"], "ERROR")
+
     def test_ai_router_falls_back_to_authenticated_openai_compatible_models_endpoint(self):
         store = Store(Path(self.temp.name) / "health-ai.sqlite3")
         store.initialize()
