@@ -40,6 +40,7 @@ from backend.store import (
 )
 from backend.integrations import IntegrationProblem, IntegrationStore
 from backend.media_generators import MediaGenerator
+from backend.manus_bridge_client import ManusBridgeClient, ManusBridgeError
 
 ROOT = Path(__file__).resolve().parents[1]
 MAX_BODY = 1_000_000
@@ -119,6 +120,31 @@ def _probe_github_cli() -> str:
         return "OFFLINE"
 
 
+def _probe_manus_bridge(base_url: str, bridge_token: str) -> str:
+    """Probe only the bridge's secret-free health endpoint; this is not a live task test."""
+    if not base_url or not bridge_token:
+        return "NOT_CONFIGURED"
+    base = base_url.strip().rstrip("/")
+    parsed = urllib.parse.urlsplit(base)
+    local_http = parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    if (parsed.scheme != "https" and not local_http) or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return "OFFLINE"
+    request = urllib.request.Request(base + "/health", headers={"Accept": "application/json", "User-Agent": "AI-Media-OS-Health/1.0"}, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=2) as response:
+            health = json.loads(response.read(64_001).decode("utf-8"))
+            if not isinstance(health, dict):
+                return "OFFLINE"
+            required = ("database_ready", "manus_api_configured", "chatgpt_auth_configured", "webhook_url_configured")
+            if any(health.get(key) is not True for key in required):
+                return "NOT_CONFIGURED"
+            return "ONLINE" if 200 <= response.status < 300 else "OFFLINE"
+    except urllib.error.HTTPError as error:
+        return "ERROR" if error.code >= 500 else "OFFLINE"
+    except (urllib.error.URLError, TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return "OFFLINE"
+
+
 def _password_file() -> Path:
     return Path(os.environ.get("OWNER_PASSWORD_FILE", str(Path.home() / ".ai-media-owner-password"))).expanduser()
 
@@ -159,6 +185,8 @@ def system_health(store: Store, owner_token: str, environ: dict[str, str] | None
     if not manus_url and manus_token:
         manus_url = "https://api.manus.ai/v2/task.list?limit=1"
     github_token = env.get("GITHUB_TOKEN", "")
+    manus_bridge_url = env.get("MANUS_BRIDGE_URL", "").strip()
+    manus_bridge_token = env.get("MANUS_BRIDGE_TOKEN", "").strip()
     github_url = (env.get("GITHUB_HEALTH_URL", "").strip() or "https://api.github.com/user") if github_token else ""
     use_github_cli = env.get("GITHUB_USE_CLI", "").strip().lower() in {"1", "true", "yes"}
 
@@ -181,6 +209,7 @@ def system_health(store: Store, owner_token: str, environ: dict[str, str] | None
         "object_storage": "ONLINE" if env.get("MANUS_API_URL", "").strip() and env.get("MANUS_API_KEY", "").strip() else "NOT_CONFIGURED",
         "ai_router": _probe(ai_url, ai_token),
         "manus": _probe(manus_url, manus_token, auth_header="x-manus-api-key", auth_scheme=""),
+        "manus_bridge": _probe_manus_bridge(manus_bridge_url, manus_bridge_token),
         "github": _probe(github_url, github_token) if github_token else (_probe_github_cli() if use_github_cli else "NOT_CONFIGURED"),
         "external_integrations": ({name: _probe(url) for name, url in external.items()} if external else "NOT_CONFIGURED"),
     }
@@ -195,12 +224,13 @@ def system_health(store: Store, owner_token: str, environ: dict[str, str] | None
 
 def module_catalog(store: Store, owner_token: str) -> list[dict[str, Any]]:
     health = system_health(store, owner_token)
+    manus_state = health["checks"]["manus_bridge"] if os.environ.get("MANUS_BRIDGE_URL", "").strip() else health["checks"]["manus"]
     live_state = {
         "ai-team": "READY",
         "characters": "READY" if store.count_active("characters") else "NOT_CONFIGURED",
         "projects": "READY" if store.count_active("projects") else "NOT_CONFIGURED",
         "ai-router": health["checks"]["ai_router"],
-        "manus": health["checks"]["manus"],
+        "manus": manus_state,
         "github": health["checks"]["github"],
     }
     return [{**module, "state": live_state.get(module["id"], module["state"]),
@@ -568,6 +598,12 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 return {"modules": module_catalog(store, token), "builder_capabilities": BUILDER_CAPABILITIES}
             self._authenticate()
             query = self._query()
+            manus_task_match = re.fullmatch(r"/api/manus/tasks/([A-Za-z0-9_-]{1,200})", path)
+            if manus_task_match:
+                try:
+                    return {"task": ManusBridgeClient().get_task(manus_task_match.group(1))}
+                except ManusBridgeError as error:
+                    raise ApiProblem(error.status, error.code, error.message) from error
             if path == "/api/dashboard":
                 health = system_health(store, token)
                 dashboard = store.dashboard(health)
@@ -795,6 +831,34 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 return {"reset": True, "message": "تمت استعادة رمز المالك وحفظه بشكل دائم على الخادم."}
             actor = self._authenticate()
             payload = self._body()
+            if path == "/api/manus/tasks":
+                if set(payload) - {"prompt", "title"} or not isinstance(payload.get("prompt"), str) or not payload["prompt"].strip():
+                    raise ApiProblem(400, "invalid_manus_task_request", "أرسل prompt نصيًا غير فارغ وtitle اختياريًا فقط.")
+                try:
+                    result = ManusBridgeClient().submit_task(payload)
+                except ManusBridgeError as error:
+                    raise ApiProblem(error.status, error.code, error.message) from error
+                task_id = str(result.get("task_id", ""))[:200]
+                with store.connect() as db:
+                    store.log_activity(db, actor=actor, action="manus.task_submitted", module="manus",
+                                       object_type="task", object_id=task_id or "unknown", status="SUCCESS",
+                                       result=json.dumps({"status": result.get("status", "accepted")}, ensure_ascii=False))
+                self._send_json(202, {"task": result})
+                return None
+            manus_message_match = re.fullmatch(r"/api/manus/tasks/([A-Za-z0-9_-]{1,200})/messages", path)
+            if manus_message_match:
+                if set(payload) != {"content"} or not isinstance(payload.get("content"), str) or not payload["content"].strip():
+                    raise ApiProblem(400, "invalid_manus_message", "أرسل content نصيًا غير فارغ فقط.")
+                try:
+                    result = ManusBridgeClient().send_message(manus_message_match.group(1), payload)
+                except ManusBridgeError as error:
+                    raise ApiProblem(error.status, error.code, error.message) from error
+                with store.connect() as db:
+                    store.log_activity(db, actor=actor, action="manus.task_message_sent", module="manus",
+                                       object_type="task", object_id=manus_message_match.group(1), status="SUCCESS",
+                                       result=json.dumps({"status": result.get("status", "accepted")}, ensure_ascii=False))
+                self._send_json(202, {"task": result})
+                return None
             integration_test_match = re.fullmatch(r"/api/external-integrations/accounts/([a-f0-9]{32})/test", path)
             if integration_test_match:
                 if payload:

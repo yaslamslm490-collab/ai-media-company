@@ -121,7 +121,7 @@ function renderHealth() {
   const allChecks = [
     ['الخادم الخلفي', health.checks.backend], ['قاعدة البيانات', health.checks.database],
     ['المصادقة', health.checks.authentication], ['موجّه النماذج', health.checks.ai_router],
-    ['Manus', health.checks.manus], ['GitHub', health.checks.github],
+    ['Manus', health.checks.manus], ['Manus Bridge', health.checks.manus_bridge], ['GitHub', health.checks.github],
   ];
   const integrations = health.checks.external_integrations;
   if (integrations && typeof integrations === 'object') Object.entries(integrations).forEach(([name, status]) => allChecks.push([name, status]));
@@ -134,7 +134,7 @@ function renderHealth() {
 }
 function healthCards(health) {
   if (!health) return '<div class="empty-state"><strong>حالة الصحة غير متاحة</strong>تعذّر الحصول على نتيجة الفحص.</div>';
-  const names = {backend: 'الخادم الخلفي', database: 'قاعدة البيانات', authentication: 'مصادقة المالك', media_vault: 'خزنة مفاتيح الوسائط', object_storage: 'التخزين الدائم', ai_router: 'AI Router', manus: 'Manus', github: 'GitHub', external_integrations: 'التكاملات الخارجية'};
+  const names = {backend: 'الخادم الخلفي', database: 'قاعدة البيانات', authentication: 'مصادقة المالك', media_vault: 'خزنة مفاتيح الوسائط', object_storage: 'التخزين الدائم', ai_router: 'AI Router', manus: 'Manus API', manus_bridge: 'Manus Bridge', github: 'GitHub', external_integrations: 'التكاملات الخارجية'};
   const entries = Object.entries(health.checks).filter(([key]) => key !== 'database_engine').flatMap(([key, value]) => value && typeof value === 'object' ? Object.entries(value).map(([name, status]) => [`${names[key]} · ${name}`, status]) : [[names[key] || key, value]]);
   return `<div class="health-grid">${entries.map(([name, status]) => `<article class="panel health-card"><div class="health-card-top"><span class="health-indicator ${statusClass(status)}"></span><span class="health-card-name">${esc(name)}</span>${statusBadge(status)}</div><p>${esc(status === 'ONLINE' ? 'نجح الفحص الفعلي لهذا المكوّن.' : status === 'OFFLINE' ? 'فشل الاتصال عند آخر فحص.' : status === 'ERROR' ? 'أبلغ الفحص عن خطأ.' : 'لا يوجد إعداد أو تكامل لهذا المكوّن حتى الآن.')}</p></article>`).join('')}</div><p class="panel-caption health-timestamp">آخر فحص: ${esc(formatDate(health.checked_at))}</p>`;
 }
@@ -165,7 +165,7 @@ function taskStatusChart(counts) {
 function renderSystemList(health) {
   const entries = Object.entries(health?.checks || {});
   return entries.map(([key, value]) => {
-    const title = ({backend: 'Backend', database: 'Database', authentication: 'Authentication', ai_router: 'AI Router', manus: 'Manus', github: 'GitHub', external_integrations: 'External integrations'})[key] || key;
+    const title = ({backend: 'Backend', database: 'Database', authentication: 'Authentication', ai_router: 'AI Router', manus: 'Manus API', manus_bridge: 'Manus Bridge', github: 'GitHub', external_integrations: 'External integrations'})[key] || key;
     if (value && typeof value === 'object') return Object.entries(value).map(([name, status]) => `<div class="setting-row"><div class="setting-copy"><strong>${esc(title)} · ${esc(name)}</strong><small>نتيجة فحص اتصال حقيقي</small></div>${statusBadge(status)}</div>`).join('');
     return `<div class="setting-row"><div class="setting-copy"><strong>${esc(title)}</strong><small>نتيجة فحص اتصال حقيقي</small></div>${statusBadge(value)}</div>`;
   }).join('');

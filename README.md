@@ -121,6 +121,7 @@ pnpm test
 - ملفات المعرفة تُخزن محلياً في SQLite في هذه المرحلة؛ فهرسها لا يكشف محتواها، ويُرسل المحتوى إلى AI Router فقط في سياق اختبار موظف مُصرّح له.
 - اتصال Manus/GitHub/AI Router يعتمد على اعتمادات بيئة صحيحة؛ لا تعلن الواجهة اتصالاً ناجحاً لمجرد وجود سجل أو قيمة غير صالحة.
 - جسر ChatGPT↔Manus API v2 أُضيفت ملفاته تحت `bridge/` ومخطط ChatGPT Actions تحت `integrations/`؛ لم يُنشر على عنوان HTTPS ولم يُضف مفتاح API، لذلك لا يوجد اتصال حي بعد. راجع [دليل الجسر](bridge/README.md).
+- يوفّر backend مسارات محمية للإنشاء `POST /api/manus/tasks`، واسترجاع النتيجة `GET /api/manus/tasks/{task_id}`، والمتابعة `POST /api/manus/tasks/{task_id}/messages` عند إعداد `MANUS_BRIDGE_URL` و`MANUS_BRIDGE_TOKEN` على الخادم.
 
 لا يبدأ هذا العمل أي مرحلة أو وحدة إنتاج كبرى أخرى قبل اعتماد المالك لهذه المرحلة.
 

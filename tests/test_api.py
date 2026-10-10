@@ -23,6 +23,7 @@ class ApiTestCase(unittest.TestCase):
         self.env_patch = patch.dict(os.environ, {
             "AI_ROUTER_HEALTH_URL": "", "AI_ROUTER_API_KEY": "", "OPENAI_API_BASE": "", "OPENAI_API_KEY": "",
             "MANUS_HEALTH_URL": "", "MANUS_API_TOKEN": "", "MANUS_API_KEY": "",
+            "MANUS_BRIDGE_URL": "", "MANUS_BRIDGE_TOKEN": "",
             "GITHUB_HEALTH_URL": "", "GITHUB_TOKEN": "", "GITHUB_USE_CLI": "", "EXTERNAL_HEALTH_URLS": "",
         })
         self.env_patch.start()
@@ -86,6 +87,7 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(payload["checks"]["authentication"], "ONLINE")
         self.assertEqual(payload["checks"]["github"], "NOT_CONFIGURED")
         self.assertEqual(payload["checks"]["manus"], "NOT_CONFIGURED")
+        self.assertEqual(payload["checks"]["manus_bridge"], "NOT_CONFIGURED")
         self.assertEqual(payload["overall"], "NOT_CONFIGURED")
 
     def test_health_reports_database_error_when_ping_fails(self):
@@ -96,6 +98,98 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(health["checks"]["backend"], "ONLINE")
         self.assertEqual(health["checks"]["database"], "ERROR")
         self.assertEqual(health["overall"], "ERROR")
+
+    def test_manus_bridge_health_probe_requires_all_readiness_flags(self):
+        from backend.server import _probe_manus_bridge
+
+        body = json.dumps({
+            "database_ready": True,
+            "manus_api_configured": True,
+            "chatgpt_auth_configured": True,
+            "webhook_url_configured": True,
+        }).encode()
+
+        class FakeResponse:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *_args): return None
+            def read(self, _size=-1): return body
+
+        with patch("backend.server.urllib.request.urlopen", return_value=FakeResponse()):
+            self.assertEqual(_probe_manus_bridge("https://bridge.test.example", "bridge-test-token"), "ONLINE")
+        body = b'{"database_ready":true,"manus_api_configured":false,"chatgpt_auth_configured":true,"webhook_url_configured":true}'
+        with patch("backend.server.urllib.request.urlopen", return_value=FakeResponse()):
+            self.assertEqual(_probe_manus_bridge("https://bridge.test.example", "bridge-test-token"), "NOT_CONFIGURED")
+        self.assertEqual(_probe_manus_bridge("http://bridge.example.com", "bridge-test-token"), "OFFLINE")
+
+    def test_manus_bridge_routes_are_owner_protected_and_return_task_result(self):
+        from backend.manus_bridge_client import ManusBridgeClient
+
+        with patch.dict(os.environ, {"MANUS_BRIDGE_URL": "https://bridge.test.example", "MANUS_BRIDGE_TOKEN": "bridge-secret-test-only"}):
+            with patch.object(ManusBridgeClient, "submit_task", return_value={"task_id": "task_123", "status": "running"}) as submit:
+                status, result = self.request("POST", "/api/manus/tasks", body={"title": "Test", "prompt": "Review project safely."}, token=self.token)
+            self.assertEqual(status, 202)
+            self.assertEqual(result["task"]["task_id"], "task_123")
+            submit.assert_called_once_with({"title": "Test", "prompt": "Review project safely."})
+
+            with patch.object(ManusBridgeClient, "get_task", return_value={"task_id": "task_123", "status": "completed", "message": "Done"}) as get_task:
+                status, result = self.request("GET", "/api/manus/tasks/task_123", token=self.token)
+            self.assertEqual(status, 200)
+            self.assertEqual(result["task"]["status"], "completed")
+            get_task.assert_called_once_with("task_123")
+
+            with patch.object(ManusBridgeClient, "send_message", return_value={"task_id": "task_123", "status": "running"}) as send_message:
+                status, result = self.request("POST", "/api/manus/tasks/task_123/messages", body={"content": "Continue"}, token=self.token)
+            self.assertEqual(status, 202)
+            self.assertEqual(result["task"]["status"], "running")
+            send_message.assert_called_once_with("task_123", {"content": "Continue"})
+
+        status, result = self.request("POST", "/api/manus/tasks", body={"prompt": "must not run"})
+        self.assertEqual(status, 401)
+        self.assertEqual(result["error"]["code"], "authentication_required")
+
+    def test_manus_bridge_errors_are_sanitized(self):
+        from backend.manus_bridge_client import ManusBridgeClient, ManusBridgeError
+
+        with patch.dict(os.environ, {"MANUS_BRIDGE_URL": "", "MANUS_BRIDGE_TOKEN": ""}):
+            with self.assertRaises(ManusBridgeError) as raised:
+                ManusBridgeClient().submit_task({"prompt": "test"})
+        self.assertEqual(raised.exception.code, "manus_bridge_not_configured")
+        self.assertNotIn("bridge-secret", str(raised.exception))
+
+    def test_manus_bridge_client_sends_bearer_token_only_to_https_bridge(self):
+        from backend.manus_bridge_client import ManusBridgeClient
+
+        class FakeResponse:
+            status = 202
+            def __enter__(self): return self
+            def __exit__(self, *_args): return None
+            def read(self, _size=-1): return b'{"task_id":"task_456","status":"running"}'
+
+        with patch.dict(os.environ, {"MANUS_BRIDGE_URL": "https://bridge.test.example", "MANUS_BRIDGE_TOKEN": "bridge-test-token-only"}):
+            with patch("backend.manus_bridge_client.urlopen", return_value=FakeResponse()) as open_url:
+                result = ManusBridgeClient().submit_task({"prompt": "Review safely"})
+        request = open_url.call_args.args[0]
+        self.assertEqual(request.full_url, "https://bridge.test.example/v1/tasks")
+        self.assertEqual(request.get_header("Authorization"), "Bearer bridge-test-token-only")
+        self.assertNotIn("MANUS_API_KEY", str(request.headers))
+        self.assertEqual(result["task_id"], "task_456")
+
+    def test_manus_bridge_client_rejects_public_http_url(self):
+        from backend.manus_bridge_client import ManusBridgeClient, ManusBridgeError
+
+        with patch.dict(os.environ, {"MANUS_BRIDGE_URL": "http://bridge.example.com", "MANUS_BRIDGE_TOKEN": "bridge-test-token"}):
+            with self.assertRaises(ManusBridgeError) as raised:
+                ManusBridgeClient().submit_task({"prompt": "test"})
+        self.assertEqual(raised.exception.code, "manus_bridge_url_invalid")
+
+    def test_manus_bridge_connection_status_is_reflected_in_manus_module(self):
+        with patch.dict(os.environ, {"MANUS_BRIDGE_URL": "https://bridge.test.example", "MANUS_BRIDGE_TOKEN": "bridge-token"}):
+            with patch("backend.server._probe_manus_bridge", return_value="ONLINE"):
+                status, payload = self.request("GET", "/api/modules")
+        self.assertEqual(status, 200)
+        manus = next(module for module in payload["modules"] if module["id"] == "manus")
+        self.assertEqual(manus["state"], "ONLINE")
 
     def test_ai_router_falls_back_to_authenticated_openai_compatible_models_endpoint(self):
         store = Store(Path(self.temp.name) / "health-ai.sqlite3")
