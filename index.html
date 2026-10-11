@@ -1,9 +1,15 @@
 <!doctype html>
-<html lang="ar" dir="rtl">
+<html lang="ar" dir="rtl" data-theme="light">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="theme-color" content="#10131c" />
+  <meta name="theme-color" content="#f4f7fb" />
+  <script>
+    try {
+      const savedTheme = localStorage.getItem('nada-ai-theme');
+      if (savedTheme === 'light' || savedTheme === 'dark') document.documentElement.dataset.theme = savedTheme;
+    } catch {}
+  </script>
   <meta name="description" content="AI Media OS — مركز التحكم التشغيلي للشركة." />
   <title>AI Media OS — مركز التحكم</title>
   <link rel="stylesheet" href="./styles.css" />
@@ -46,6 +52,7 @@
         <div class="topbar-actions">
           <label class="search-box" for="global-search"><span class="search-symbol">⌕</span><input id="global-search" type="search" placeholder="ابحث في المهام والموافقات والفريق…" autocomplete="off" aria-controls="global-search-results" aria-expanded="false" /><kbd>⌘ K</kbd></label>
           <div id="global-search-results" class="global-search-results" role="status" aria-live="polite" aria-atomic="false" hidden></div>
+          <button class="button button-quiet theme-toggle" id="theme-toggle-header" type="button" data-theme-toggle aria-label="الوضع الحالي: الفاتح. التبديل إلى الداكن" aria-pressed="false" title="الوضع الحالي: الفاتح"><span class="theme-toggle-icon" data-theme-icon aria-hidden="true">☀</span><span class="theme-toggle-label" data-theme-label>الوضع الفاتح</span></button>
           <button class="button button-quiet owner-auth-button" id="auth-button" type="button"><span id="auth-button-icon">◇</span><span id="auth-button-label">تهيئة الوصول</span></button>
         </div>
       </header>
@@ -88,7 +95,7 @@
 
   <div class="overlay" id="auth-overlay" hidden>
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-      <div class="modal-head"><div><span class="modal-kicker">حماية مساحة العمل</span><h2 id="auth-title">دخول المالك</h2></div><button class="icon-button" data-close="auth-overlay" aria-label="إغلاق">×</button></div>
+      <div class="modal-head"><div><span class="modal-kicker">حماية مساحة العمل</span><h2 id="auth-title">دخول المالك</h2></div><button class="button button-quiet theme-toggle theme-toggle-modal" type="button" data-theme-toggle aria-label="الوضع الحالي: الفاتح. التبديل إلى الداكن" aria-pressed="false" title="الوضع الحالي: الفاتح"><span class="theme-toggle-icon" data-theme-icon aria-hidden="true">☀</span><span class="theme-toggle-label" data-theme-label>الوضع الفاتح</span></button><button class="icon-button" data-close="auth-overlay" aria-label="إغلاق">×</button></div>
       <p class="modal-help">أدخل كلمة مرور المالك المضبوطة على الخادم للتحقق من هويتك. لا تُحفظ في ملفات الموقع، بل في جلسة المتصفح الحالية فقط.</p>
       <form id="auth-form"><label class="field-label" for="owner-token-input">كلمة مرور المالك</label><input class="text-field" id="owner-token-input" type="password" autocomplete="current-password" required maxlength="256" placeholder="أدخل رمز المالك من 6 أرقام" /><button type="button" class="text-link forgot-password-link" id="forgot-password-toggle">هل نسيت كلمة السر؟</button><div id="auth-error" class="form-error" hidden></div><div class="form-actions"><button type="button" class="button button-quiet" id="clear-token-button">مسح الجلسة</button><button class="button button-primary" type="submit">التحقق والدخول</button></div></form>
       <form id="recovery-form" hidden><div class="security-callout compact-callout"><strong>استعادة طارئة</strong><p>أدخل كود الاسترداد المضبوط كمتغير OWNER_RECOVERY_CODE على الخادم، ثم رمزاً جديداً.</p></div><label class="field-label" for="recovery-code-input">كود الاسترداد</label><input class="text-field" id="recovery-code-input" name="recovery_code" type="password" autocomplete="one-time-code" required /><label class="field-label" for="recovery-new-password">الرمز الجديد</label><input class="text-field" id="recovery-new-password" name="new_password" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required /><label class="field-label" for="recovery-confirm-password">تأكيد الرمز الجديد</label><input class="text-field" id="recovery-confirm-password" name="confirm_password" type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required /><div id="recovery-error" class="form-error" hidden></div><div class="form-actions"><button type="button" class="button button-quiet" id="back-to-login">العودة للدخول</button><button class="button button-primary" type="submit">استعادة الرمز</button></div></form>

@@ -7,6 +7,44 @@ import {SpeechReader, VoiceEngine} from './voice-engine.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]));
+const THEME_STORAGE_KEY = 'nada-ai-theme';
+let currentTheme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+function applyTheme(theme, persist = true) {
+  currentTheme = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = currentTheme;
+  const dark = currentTheme === 'dark';
+  const currentLabel = dark ? 'الوضع الداكن' : 'الوضع الفاتح';
+  const nextLabel = dark ? 'الفاتح' : 'الداكن';
+  $$('[data-theme-toggle]').forEach((button) => {
+    button.setAttribute('aria-pressed', String(dark));
+    button.setAttribute('aria-label', `الوضع الحالي: ${dark ? 'الداكن' : 'الفاتح'}. التبديل إلى ${nextLabel}`);
+    button.title = `الوضع الحالي: ${dark ? 'الداكن' : 'الفاتح'}`;
+    const icon = $('[data-theme-icon]', button);
+    const label = $('[data-theme-label]', button);
+    if (icon) icon.textContent = dark ? '☾' : '☀';
+    if (label) label.textContent = currentLabel;
+  });
+  const themeColor = $('meta[name="theme-color"]');
+  if (themeColor) themeColor.content = dark ? '#111b2b' : '#f4f7fb';
+  if (persist) {
+    try { localStorage.setItem(THEME_STORAGE_KEY, currentTheme); } catch {}
+  }
+}
+$$('[data-theme-toggle]').forEach((button) => button.addEventListener('click', () => {
+  applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
+}));
+const authThemeOverlay = $('#auth-overlay');
+const headerThemeToggle = $('#theme-toggle-header');
+if (authThemeOverlay && headerThemeToggle) {
+  const syncThemeControl = () => { headerThemeToggle.hidden = !authThemeOverlay.hidden; };
+  new MutationObserver(syncThemeControl).observe(authThemeOverlay, {attributes: true, attributeFilter: ['hidden']});
+  syncThemeControl();
+}
+try {
+  const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+  if (savedTheme === 'light' || savedTheme === 'dark') currentTheme = savedTheme;
+} catch {}
+applyTheme(currentTheme, false);
 const state = {
   page: location.hash.slice(1) || 'dashboard',
   modules: [],
