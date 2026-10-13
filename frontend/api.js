@@ -1,5 +1,5 @@
 const API_ROOT = '/api';
-let ownerToken = sessionStorage.getItem('ai-media-owner-token') || '';
+let ownerSessionActive = false;
 
 export class ApiError extends Error {
   constructor(message, status, code, details = {}) {
@@ -18,12 +18,11 @@ async function request(path, {method = 'GET', body, publicEndpoint = false, quer
   });
   const headers = {Accept: 'application/json'};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  if (!publicEndpoint && ownerToken) headers['X-Owner-Token'] = ownerToken;
   const controller = timeoutMs > 0 ? new AbortController() : null;
   let timeoutId;
   try {
     if (controller) timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    const response = await fetch(url, {method, headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store', signal: controller?.signal});
+    const response = await fetch(url, {method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: 'same-origin', cache: 'no-store', signal: controller?.signal});
     const payload = await response.json().catch((error) => {
       if (controller?.signal.aborted) throw error;
       return {};
@@ -45,11 +44,11 @@ async function request(path, {method = 'GET', body, publicEndpoint = false, quer
 }
 
 async function mediaBlob(generationId, kind) {
-  if (!ownerToken) throw new ApiError('يلزم تسجيل دخول المالك لفتح ملف الوسائط.', 401, 'authentication_required');
+  if (!ownerSessionActive) throw new ApiError('يلزم تسجيل دخول المالك لفتح ملف الوسائط.', 401, 'authentication_required');
   const url = new URL(`${API_ROOT}/external-integrations/generations/${encodeURIComponent(generationId)}/${kind}`, window.location.origin);
   let response;
   try {
-    response = await fetch(url, {headers: {Accept: '*/*', 'X-Owner-Token': ownerToken}, cache: 'no-store'});
+    response = await fetch(url, {headers: {Accept: '*/*'}, credentials: 'same-origin', cache: 'no-store'});
   } catch (error) {
     throw new ApiError('تعذّر الاتصال بالخادم الخلفي.', 0, 'network_error');
   }
@@ -62,9 +61,22 @@ async function mediaBlob(generationId, kind) {
 }
 
 export const api = {
-  get hasToken() { return Boolean(ownerToken); },
-  setToken(token) { ownerToken = token.trim(); if (ownerToken) sessionStorage.setItem('ai-media-owner-token', ownerToken); else sessionStorage.removeItem('ai-media-owner-token'); },
-  clearToken() { this.setToken(''); },
+  get hasToken() { return ownerSessionActive; },
+  setSessionActive(active) { ownerSessionActive = Boolean(active); },
+  async loginOwner(token) {
+    const response = await request('/auth/login', {method: 'POST', body: {token: String(token || '')}, publicEndpoint: true});
+    ownerSessionActive = response.authenticated === true;
+    return response;
+  },
+  async sessionStatus() {
+    const response = await request('/auth/session', {publicEndpoint: true});
+    ownerSessionActive = response.authenticated === true;
+    return ownerSessionActive;
+  },
+  clearToken() {
+    ownerSessionActive = false;
+    void request('/auth/logout', {method: 'POST', publicEndpoint: true}).catch(() => {});
+  },
   health: () => request('/health', {publicEndpoint: true, timeoutMs: 15000, timeoutMessage: 'انتهت مهلة فحص الخادم وقاعدة البيانات. أعد المحاولة بعد التحقق من الاتصال.'}),
   sendCommand: (body) => request('/commands', {method: 'POST', body}),
   serviceIntegrations: () => request('/service-integrations'),

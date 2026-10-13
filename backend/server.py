@@ -2,21 +2,26 @@
 from __future__ import annotations
 
 import hmac
+import hashlib
 import json
 import mimetypes
 import os
+import secrets
 import re
 import sqlite3
 import sys
 import subprocess
 import shutil
 import tarfile
+import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
 
@@ -137,15 +142,118 @@ def _read_persistent_password() -> str:
 def _persist_password(value: str) -> None:
     path = _password_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(value + "\n", encoding="utf-8")
+    descriptor = -1
+    temporary_path: str | None = None
     try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+        descriptor, temporary_path = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as password_file:
+            descriptor = -1
+            password_file.write(value + "\n")
+            password_file.flush()
+            os.fsync(password_file.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            # Atomic replacement succeeded; some filesystems do not support directory fsync.
+            pass
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary_path:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
 
 
 def _valid_rotated_password(value: str) -> bool:
     return re.fullmatch(r"(?:[0-9]{6}|[^\s]{16,256})", value) is not None
+
+
+class _OwnerSessions:
+    """Short-lived opaque browser sessions; raw session ids are never retained."""
+
+    def __init__(self, ttl_seconds: int = 8 * 60 * 60):
+        self.ttl_seconds = ttl_seconds
+        self._sessions: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def issue(self) -> str:
+        value = secrets.token_urlsafe(32)
+        now = time.monotonic()
+        digest = hashlib.sha256(value.encode("ascii")).hexdigest()
+        with self._lock:
+            self._sessions = {key: expiry for key, expiry in self._sessions.items() if expiry > now}
+            self._sessions[digest] = now + self.ttl_seconds
+        return value
+
+    def valid(self, value: str) -> bool:
+        if not value or len(value) > 128:
+            return False
+        digest = hashlib.sha256(value.encode("ascii", errors="ignore")).hexdigest()
+        now = time.monotonic()
+        with self._lock:
+            expiry = self._sessions.get(digest, 0.0)
+            if expiry <= now:
+                self._sessions.pop(digest, None)
+                return False
+            return True
+
+    def revoke_all(self) -> None:
+        with self._lock:
+            self._sessions.clear()
+
+    def revoke(self, value: str) -> None:
+        digest = hashlib.sha256(value.encode("ascii", errors="ignore")).hexdigest()
+        with self._lock:
+            self._sessions.pop(digest, None)
+
+
+def _owner_cookie_secure() -> bool:
+    configured = os.environ.get("COOKIE_SECURE", "").strip().lower()
+    if configured in {"1", "true", "yes", "on"}:
+        return True
+    if configured in {"0", "false", "no", "off"}:
+        return False
+    public_url = os.environ.get("PUBLIC_BASE_URL", "").strip() or os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+    return urllib.parse.urlsplit(public_url).scheme.lower() == "https"
+
+
+class _AttemptLimiter:
+    """Bound failed credential checks per remote address without blocking valid owners."""
+
+    def __init__(self, limit: int = 5, window_seconds: int = 600, max_keys: int = 4096):
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self.max_keys = max_keys
+        self._attempts: dict[tuple[str, str], list[float]] = {}
+        self._lock = threading.Lock()
+
+    def record_failure(self, category: str, remote_ip: str) -> bool:
+        now = time.monotonic()
+        key = (category, remote_ip)
+        with self._lock:
+            recent = [stamp for stamp in self._attempts.get(key, []) if now - stamp < self.window_seconds]
+            if len(recent) >= self.limit:
+                self._attempts[key] = recent
+                return False
+            recent.append(now)
+            self._attempts[key] = recent
+            if len(self._attempts) > self.max_keys:
+                oldest = min(self._attempts, key=lambda item: self._attempts[item][-1])
+                self._attempts.pop(oldest, None)
+            return True
+
+    def reset(self, category: str, remote_ip: str) -> None:
+        with self._lock:
+            self._attempts.pop((category, remote_ip), None)
 
 
 def system_health(store: Store, owner_token: str, environ: dict[str, str] | None = None) -> dict[str, Any]:
@@ -392,6 +500,8 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
     media_generator = MediaGenerator(integration_store)
     collaboration = Collaboration(store)
     oauth = OAuthProvider(store, lambda: token)
+    owner_attempt_limiter = _AttemptLimiter()
+    owner_sessions = _OwnerSessions()
 
     class Handler(SimpleHTTPRequestHandler):
         server_version = "AI-Media-OS/1.0"
@@ -405,13 +515,15 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 args = tuple(re.sub(re.escape(log_path) + r"\?[^\s]*", log_path + "?[redacted]", str(item)) for item in args)
             sys.stderr.write("%s - %s\n" % (self.address_string(), format % args))
 
-        def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+        def _send_json(self, status: int, payload: dict[str, Any], headers: dict[str, str] | None = None) -> None:
             raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(raw)
 
@@ -433,12 +545,65 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
         def _authenticate(self) -> str:
             if not token:
                 raise ApiProblem(503, "auth_not_configured", "المصادقة غير مهيأة. اضبط OWNER_MASTER_PASSWORD أو OWNER_API_TOKEN على الخادم أولاً.")
+            remote_ip = self.client_address[0]
             supplied = self.headers.get("X-Owner-Token", "")
+            if supplied and hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8")):
+                owner_attempt_limiter.reset("owner", remote_ip)
+                return "owner"
+            if self._owner_session_valid():
+                owner_attempt_limiter.reset("owner", remote_ip)
+                self._validate_cookie_request_origin()
+                return "owner"
+            if not owner_attempt_limiter.record_failure("owner", remote_ip):
+                raise ApiProblem(429, "too_many_auth_attempts", "توقفت محاولات الدخول مؤقتًا بعد محاولات غير صحيحة. انتظر عشر دقائق ثم أعد المحاولة.")
             if not supplied:
                 raise ApiProblem(401, "authentication_required", "يلزم رمز دخول المالك للوصول إلى بيانات مساحة العمل.")
-            if not hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8")):
-                raise ApiProblem(401, "invalid_token", "رمز دخول المالك غير صالح.")
-            return "owner"
+            raise ApiProblem(401, "invalid_token", "رمز دخول المالك غير صالح.")
+
+        def _owner_session_value(self) -> str:
+            cookie = SimpleCookie()
+            try:
+                cookie.load(self.headers.get("Cookie", ""))
+            except Exception:
+                return ""
+            morsel = cookie.get("nada_owner_session")
+            return morsel.value if morsel else ""
+
+        def _owner_session_valid(self) -> bool:
+            return owner_sessions.valid(self._owner_session_value())
+
+        def _validate_cookie_request_origin(self) -> None:
+            if self.command in {"GET", "HEAD", "OPTIONS"}:
+                return
+            origin_value = self.headers.get("Origin", "").strip()
+            parsed_origin = urllib.parse.urlsplit(origin_value)
+            host = self.headers.get("Host", "").strip().lower()
+            public_url = os.environ.get("PUBLIC_BASE_URL", "").strip() or os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+            expected_scheme = urllib.parse.urlsplit(public_url).scheme.lower()
+            if not expected_scheme:
+                expected_scheme = self.headers.get("X-Forwarded-Proto", "http").split(",", 1)[0].strip().lower()
+            if (
+                parsed_origin.scheme.lower() not in {"http", "https"}
+                or parsed_origin.netloc.lower() != host
+                or parsed_origin.scheme.lower() != expected_scheme
+                or parsed_origin.username is not None
+                or parsed_origin.password is not None
+                or parsed_origin.path not in {"", "/"}
+                or parsed_origin.query
+                or parsed_origin.fragment
+            ):
+                raise ApiProblem(403, "csrf_validation_failed", "تم رفض الطلب لعدم تطابق مصدر الجلسة.")
+
+        def _owner_cookie(self, session_id: str, *, clear: bool = False) -> str:
+            origin_scheme = urllib.parse.urlsplit(self.headers.get("Origin", "")).scheme.lower()
+            secure = _owner_cookie_secure() or origin_scheme == "https"
+            value = "" if clear else session_id
+            max_age = 0 if clear else owner_sessions.ttl_seconds
+            same_site = "None" if secure else "Strict"
+            attributes = [f"nada_owner_session={value}", "Path=/", "HttpOnly", f"SameSite={same_site}", f"Max-Age={max_age}"]
+            if secure:
+                attributes.append("Secure")
+            return "; ".join(attributes)
 
         def _query(self) -> dict[str, str]:
             return {key: values[0] for key, values in urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).items() if values}
@@ -871,6 +1036,8 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 return health
             if path == "/api/collaboration/status":
                 return {"collaboration": self._collaboration_health()}
+            if path == "/api/auth/session":
+                return {"authenticated": bool(token and self._owner_session_valid())}
             if path == "/api/modules":
                 return {"modules": module_catalog(store, token), "builder_capabilities": BUILDER_CAPABILITIES}
             self._authenticate()
@@ -1025,7 +1192,30 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             raise ApiProblem(404, "not_found", "مسار API غير موجود.")
 
         def _post_api(self) -> dict[str, Any] | None:
+            nonlocal token
             path = urllib.parse.urlsplit(self.path).path
+            if path == "/api/auth/login":
+                if not token:
+                    raise ApiProblem(503, "auth_not_configured", "المصادقة غير مهيأة. اضبط رمز المالك في أسرار المضيف أولاً.")
+                remote_ip = self.client_address[0]
+                payload = self._body()
+                supplied = payload.get("token")
+                valid = isinstance(supplied, str) and hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8"))
+                if not valid:
+                    if not owner_attempt_limiter.record_failure("owner", remote_ip):
+                        raise ApiProblem(429, "too_many_auth_attempts", "توقفت محاولات الدخول مؤقتًا. انتظر عشر دقائق ثم أعد المحاولة.")
+                    raise ApiProblem(401, "invalid_token", "رمز دخول المالك غير صالح.")
+                owner_attempt_limiter.reset("owner", remote_ip)
+                session_id = owner_sessions.issue()
+                self._send_json(200, {"authenticated": True}, {"Set-Cookie": self._owner_cookie(session_id)})
+                return None
+            if path == "/api/auth/logout":
+                session_id = self._owner_session_value()
+                if session_id and owner_sessions.valid(session_id):
+                    self._validate_cookie_request_origin()
+                    owner_sessions.revoke(session_id)
+                self._send_json(200, {"logged_out": True}, {"Set-Cookie": self._owner_cookie("", clear=True)})
+                return None
             restore_match = re.fullmatch(r"/api/execution-reports/([a-f0-9]{32})/restore", path)
             if restore_match:
                 actor = self._authenticate()
@@ -1157,7 +1347,6 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 payload = self._body()
                 return {"integration": integration_store.upsert_manual(payload, actor)}
             if path == "/api/auth/change-password":
-                nonlocal token
                 self._authenticate()
                 if os.environ.get("OWNER_MASTER_PASSWORD", "").strip():
                     raise ApiProblem(409, "password_managed_by_environment", "رمز المالك مضبوط كسر OWNER_MASTER_PASSWORD لدى المضيف؛ غيّره من مدير الأسرار هناك. لم يُغيّر التطبيق الرمز.")
@@ -1175,9 +1364,12 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                     raise ApiProblem(400, "password_confirmation_mismatch", "تأكيد الرمز الجديد غير مطابق.")
                 if hmac.compare_digest(new_password, token):
                     raise ApiProblem(400, "password_unchanged", "يجب اختيار رمز جديد مختلف عن الرمز الحالي.")
-                token = new_password
                 _persist_password(new_password)
-                return {"changed": True, "message": "تم تغيير رمز المالك وحفظه بشكل دائم على الخادم."}
+                token = new_password
+                owner_sessions.revoke_all()
+                session_id = owner_sessions.issue()
+                self._send_json(200, {"changed": True, "message": "تم تغيير رمز المالك وحفظه بشكل دائم على الخادم."}, {"Set-Cookie": self._owner_cookie(session_id)})
+                return None
             if path == "/api/auth/reset-password":
                 if os.environ.get("OWNER_MASTER_PASSWORD", "").strip():
                     raise ApiProblem(409, "password_managed_by_environment", "رمز المالك مضبوط كسر OWNER_MASTER_PASSWORD لدى المضيف؛ غيّره من مدير الأسرار هناك. لم يُغيّر التطبيق الرمز.")
@@ -1188,13 +1380,21 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 expected_recovery = os.environ.get("OWNER_RECOVERY_CODE", "").strip()
                 if not expected_recovery:
                     raise ApiProblem(503, "recovery_not_configured", "استعادة كلمة السر غير مهيأة؛ يلزم OWNER_RECOVERY_CODE على الخادم.")
-                if not isinstance(recovery_code, str) or not hmac.compare_digest(recovery_code, expected_recovery):
+                remote_ip = self.client_address[0]
+                valid_recovery = isinstance(recovery_code, str) and hmac.compare_digest(recovery_code, expected_recovery)
+                if not valid_recovery and not owner_attempt_limiter.record_failure("recovery", remote_ip):
+                    raise ApiProblem(429, "too_many_recovery_attempts", "توقفت محاولات الاستعادة مؤقتًا بعد محاولات غير صحيحة. انتظر عشر دقائق ثم أعد المحاولة.")
+                if not valid_recovery:
                     raise ApiProblem(401, "invalid_recovery_code", "كود الاسترداد غير صالح.")
                 if not isinstance(new_password, str) or not _valid_rotated_password(new_password) or new_password != confirm_password:
                     raise ApiProblem(400, "invalid_reset_password", "أدخل PIN من ستة أرقام أو رمزاً قوياً من 16 إلى 256 حرفاً بلا مسافات، مع تأكيد مطابق.")
-                token = new_password
                 _persist_password(new_password)
-                return {"reset": True, "message": "تمت استعادة رمز المالك وحفظه بشكل دائم على الخادم."}
+                owner_attempt_limiter.reset("recovery", remote_ip)
+                token = new_password
+                owner_sessions.revoke_all()
+                session_id = owner_sessions.issue()
+                self._send_json(200, {"reset": True, "message": "تمت استعادة رمز المالك وحفظه بشكل دائم على الخادم."}, {"Set-Cookie": self._owner_cookie(session_id)})
+                return None
             actor = self._authenticate()
             payload = self._body()
             integration_test_match = re.fullmatch(r"/api/external-integrations/accounts/([a-f0-9]{32})/test", path)
