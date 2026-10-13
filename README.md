@@ -28,7 +28,7 @@ python3 scripts/init_vault.py
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-اضبط `OWNER_MASTER_PASSWORD` في بيئة الخادم (الموصى به؛ ستة أرقام بالضبط) أو استخدم `OWNER_API_TOKEN` للتوافق مع الإصدارات السابقة. لا تضع قيمة السر في Git؛ ثم:
+اضبط `OWNER_API_TOKEN` كسر قوي في بيئة المضيف (كما يطلب Render Blueprint)، أو `OWNER_MASTER_PASSWORD` من ستة أرقام بالضبط. يقبل نموذج الدخول السر كاملاً بلا قيد ستة أرقام. لا تضع قيمة السر في Git؛ ثم:
 
 ```bash
 pnpm build       # ينسخ الأصول المتحققة إلى dist/
@@ -38,7 +38,11 @@ HOST=0.0.0.0 PORT=3000 pnpm start  # منفذ WebDev الافتراضي
 
 يمكن أيضاً استخدام `python3 -m backend.server`. إذا وُجد `dist/index.html` يقدّم الخادم الملفات المسموح بها من `dist/`. محلياً يستخدم SQLite عبر `AI_MEDIA_DB_PATH`؛ وعند وجود `DATABASE_URL` من WebDev يستخدم MySQL المُدار. يقبل الخادم `HOST` و`PORT` و`AI_MEDIA_STATIC_ROOT`؛ إعداد النشر يستمع على `0.0.0.0:$PORT` ويستخدم المنفذ 3000 افتراضياً.
 
-افتح `http://127.0.0.1:8080` وسجّل الدخول كمالك. يُحفظ السر في `sessionStorage` للجلسة فقط. عند غياب `OWNER_MASTER_PASSWORD` و`OWNER_API_TOKEN` تبقى الصحة العامة متاحة وتُغلق كل مسارات الشركة الخاصة.
+افتح `http://127.0.0.1:8080` وسجّل الدخول كمالك. يُحفظ السر في `sessionStorage` للجلسة فقط. عند غياب `OWNER_MASTER_PASSWORD` و`OWNER_API_TOKEN` تبقى الصحة العامة متاحة وتُغلق كل مسارات الشركة الخاصة بـ503 (`auth_not_configured`). في Render يعيّن Blueprint مسار `OWNER_PASSWORD_FILE=/var/data/owner-password.txt` على القرص الدائم كي يستمر تغيير رمز المالك بعد إعادة التشغيل. يمكن تدوير السر إلى PIN من ستة أرقام للتوافق أو رمز عشوائي قوي من 16 إلى 256 حرفًا بلا مسافات. إذا كان `OWNER_MASTER_PASSWORD` نفسه مضبوطًا كسر مضيف، فالتدوير يتم من مدير الأسرار للمضيف وليس من شاشة الإعدادات.
+
+### المحادثة وإدخال الصوت
+
+يستدعي شريط الأوامر `AI_ROUTER_BASE_URL` و`AI_ROUTER_API_KEY` لتوليد رد نصي فعلي، ويحفظ الرد واسم النموذج في تقرير التنفيذ. غياب الموجّه أو فشل استدعائه يظهر `BLOCKED` أو `FAILED` ولا يُعرض كنجاح. إدخال الصوت المباشر يعتمد `SpeechRecognition` وإذن الميكروفون في المتصفح، وقراءة النص تعتمد `speechSynthesis` ووجود صوت عربي على الجهاز. رفع تسجيل خام أو صورة/فيديو لا يملك ASR/رؤية في هذا المسار بعد، فيظهر أنه غير محلل. لم يُختبر اتصال مزود حي أو ميكروفون فعلي في الاختبارات المحلية.
 
 ### بيانات البداية الاختيارية
 
@@ -60,7 +64,7 @@ python3 -m backend.seed
 
 للتطوير المحلي تُخزن الأسرار في بيئة الخادم أو `.env` محلي مستثنى من Git؛ وفي WebDev تُدخل عبر لوحة الأسرار المحمية، ولا تُضمّن في `dist/` أو المتصفح أو Git أو سجل النشاط. يتحقق الخادم فعلياً من اتصال النظام قبل أن يعرض `ONLINE`.
 
-- **AI Router:** `AI_ROUTER_BASE_URL` و`AI_ROUTER_API_KEY`، واختيارياً `AI_ROUTER_MODEL` أو `AI_ROUTER_CHAT_COMPLETIONS_URL`. يقبل أيضاً إعداد `OPENAI_API_BASE` و`OPENAI_API_KEY` المتوافق القديم. يُفحص `/models` وتُستدعى `/chat/completions` عند اختبار موظف.
+- **AI Router:** `AI_ROUTER_BASE_URL` و`AI_ROUTER_API_KEY`، واختيارياً `AI_ROUTER_MODEL` أو `AI_ROUTER_CHAT_COMPLETIONS_URL`. يقبل أيضاً إعداد `OPENAI_API_BASE` و`OPENAI_API_KEY` المتوافق القديم. يُفحص `/models`؛ ويستدعي `/api/commands` نقطة `/chat/completions` لتوليد رد محادثة عند توفر الموجّه.
 - **Manus:** `MANUS_API_KEY` أو `MANUS_API_TOKEN`، مع فحص محدود عبر `GET /v2/task.list?limit=1`. لا تُعرض الحالة متصلة دون مفتاح صالح واستجابة ناجحة؛ إدارة الشركة لا تستخدم Manus كموظف داخلي.
 - **التعاون المدمج:** `/mcp` مدعوم بـOAuth 2.1/PKCE وDCR؛ عيّن `OWNER_API_TOKEN` داخل مدير أسرار المضيف للموافقة على الربط، ويكتشف Render عنوان HTTPS تلقائيًا من `RENDER_EXTERNAL_URL`. `MANUS_API_KEY` مطلوب فقط للإرسال/المزامنة الحية. راجع [دليل التعاون](docs/collaboration.md)؛ `NADA_MCP_TOKEN` باقٍ للتوافق القديم فقط.
 - **GitHub:** اعتماد مضيف `gh` عند تفعيل `GITHUB_USE_CLI=true`، أو `GITHUB_TOKEN` و`GITHUB_HEALTH_URL`. سحب/دفع المستودع أثناء التطوير لا يعني تلقائياً أن تكامل التطبيق نفسه متصل.

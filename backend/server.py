@@ -123,7 +123,8 @@ def _probe_github_cli() -> str:
 
 
 def _password_file() -> Path:
-    return Path(os.environ.get("OWNER_PASSWORD_FILE", str(Path.home() / ".ai-media-owner-password"))).expanduser()
+    configured = os.environ.get("OWNER_PASSWORD_FILE", "").strip()
+    return Path(configured or str(Path.home() / ".ai-media-owner-password")).expanduser()
 
 
 def _read_persistent_password() -> str:
@@ -141,6 +142,10 @@ def _persist_password(value: str) -> None:
         path.chmod(0o600)
     except OSError:
         pass
+
+
+def _valid_rotated_password(value: str) -> bool:
+    return re.fullmatch(r"(?:[0-9]{6}|[^\s]{16,256})", value) is not None
 
 
 def system_health(store: Store, owner_token: str, environ: dict[str, str] | None = None) -> dict[str, Any]:
@@ -319,6 +324,43 @@ def _employee_ai_response(employee: dict[str, Any], message: str, company_store:
     return {"response": content[:12000], "model": primary}
 
 
+def _command_ai_response(message: str) -> dict[str, str]:
+    env = os.environ
+    key = env.get("AI_ROUTER_API_KEY", "") or env.get("OPENAI_API_KEY", "")
+    chat_url = env.get("AI_ROUTER_CHAT_COMPLETIONS_URL", "").strip()
+    base = (env.get("AI_ROUTER_BASE_URL", "") or env.get("OPENAI_API_BASE", "")).strip().rstrip("/")
+    if not base:
+        health_url = env.get("AI_ROUTER_HEALTH_URL", "").strip()
+        if health_url.endswith("/models"):
+            base = health_url[:-len("/models")].rstrip("/")
+    if not chat_url and base:
+        chat_url = f"{base}/chat/completions"
+    if not chat_url:
+        raise ApiProblem(503, "ai_router_not_configured", "موجّه النماذج غير مهيأ. لم يتم توليد المحتوى؛ أضف عنوان AI_ROUTER_BASE_URL ومفتاح AI_ROUTER_API_KEY في إعدادات الخادم السرية.")
+
+    model = env.get("AI_ROUTER_MODEL", "").strip()
+    if not model and base:
+        models_payload = _router_json_request(f"{base}/models", token=key)
+        models = models_payload.get("data", [])
+        model = next((item.get("id", "") for item in models if isinstance(item, dict) and re.fullmatch(r"[A-Za-z0-9._:/-]{1,120}", str(item.get("id", "")))), "") if isinstance(models, list) else ""
+    if not model or not re.fullmatch(r"[A-Za-z0-9._:/-]{1,120}", model):
+        raise ApiProblem(503, "ai_router_model_unconfigured", "لم يعثر موجّه النماذج على نموذج صالح؛ اضبط AI_ROUTER_MODEL أو endpoint /models.")
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "أنت مساعد NADA AI. أجب بالعربية ما لم يطلب المستخدم لغة أخرى. أنشئ المحتوى المطلوب بوضوح، ولا تدّع تنفيذ أي إجراء خارجي أو حفظه إلا إذا أعادت الأداة نتيجة نجاح فعلية."},
+            {"role": "user", "content": message},
+        ],
+    }
+    result = _router_json_request(chat_url, token=key, body=payload)
+    choices = result.get("choices")
+    content = choices[0].get("message", {}).get("content") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+    if not isinstance(content, str) or not content.strip():
+        raise ApiProblem(502, "ai_router_empty_response", "لم يُعِد موجّه النماذج نصاً صالحاً؛ لم يُسجّل المحتوى على أنه مكتمل.")
+    return {"response": content[:12000], "model": model}
+
+
 def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_token: str | None = None):
     project_root = Path(root).resolve()
     configured_static = os.environ.get("AI_MEDIA_STATIC_ROOT", "").strip()
@@ -331,10 +373,14 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
         resolved_db = configured_database
     else:
         resolved_db = os.environ.get("AI_MEDIA_DB_PATH", str(project_root / "data" / "dashboard.sqlite3"))
-    master_password = os.environ.get("OWNER_MASTER_PASSWORD", "") or _read_persistent_password()
+    env_master_password = os.environ.get("OWNER_MASTER_PASSWORD", "")
+    stored_password = "" if env_master_password else _read_persistent_password()
+    master_password = env_master_password or stored_password
     token = owner_token if owner_token is not None else (master_password or os.environ.get("OWNER_API_TOKEN", ""))
-    if owner_token is None and master_password and not re.fullmatch(r"[0-9]{6}", master_password):
+    if owner_token is None and env_master_password and not re.fullmatch(r"[0-9]{6}", env_master_password):
         raise ValueError("OWNER_MASTER_PASSWORD must contain exactly six digits.")
+    if owner_token is None and stored_password and not _valid_rotated_password(stored_password):
+        raise ValueError("OWNER_PASSWORD_FILE must contain either a six-digit PIN or a non-space token of 16 to 256 characters.")
     if token and len(token) < 6:
         raise ValueError("OWNER_MASTER_PASSWORD or OWNER_API_TOKEN must be at least 6 characters.")
     store = Store(resolved_db)
@@ -1016,6 +1062,11 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 store.create_execution_report(report)
                 stages = []
                 created_page = None
+                response_text = ""
+                command_message = ""
+                terminal_status = "SUCCESS"
+                did_execute = False
+                router_test = {"name": "AI Router", "status": "NOT_TESTED", "detail": "لم يُستدعَ موجّه النماذج في هذا الأمر."}
                 if re.search(r"أنشئ\s+صفحة(?:\s+اختبار)?\s+جديدة", command):
                     stages = [
                         {"key": "understand", "label": "فهم الأمر", "status": "COMPLETED"},
@@ -1026,6 +1077,8 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                     created_page = store.create_workspace_page(page_title, "تم إنشاؤها بأمر تنفيذي من شريط التفاعل.", actor)
                     stages[1]["status"] = "COMPLETED"
                     stages.append({"key": "verify", "label": "التحقق من الحفظ", "status": "COMPLETED"})
+                    did_execute = True
+                    command_message = "تم إنشاء الصفحة وحفظها فعلياً."
                 elif re.search(r"عدّل\s+الصفحة\s+الحالية", command):
                     stages = [{"key": "analyze", "label": "تحليل التعديل", "status": "COMPLETED"}, {"key": "update", "label": "تعديل الصفحة وحفظها", "status": "RUNNING"}]
                     pages = store.list_workspace_pages(1)
@@ -1034,26 +1087,71 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                     created_page = store.update_latest_workspace_page(pages[0]["content"] + "\nتم تعديلها بأمر تنفيذي.", actor)
                     stages[1]["status"] = "COMPLETED"
                     stages.append({"key": "verify", "label": "تأكيد التعديل", "status": "COMPLETED"})
+                    did_execute = True
+                    command_message = "تم تعديل الصفحة وحفظ التغيير فعلياً."
                 elif re.search(r"اختبر\s+التطبيق", command):
                     stages = [{"key": "analyze", "label": "تحليل الطلب", "status": "COMPLETED"}, {"key": "test", "label": "اختبار الاتصال وقاعدة البيانات", "status": "RUNNING"}]
                     if not store.ping():
                         raise ApiProblem(503, "application_test_failed", "فشل اختبار قاعدة البيانات.")
                     stages[1]["status"] = "COMPLETED"
                     stages.append({"key": "confirm", "label": "تأكيد النتيجة", "status": "COMPLETED"})
+                    did_execute = True
+                    command_message = "نجح فحص التطبيق وقاعدة البيانات محلياً."
+                elif audio_base64 or attachment_base64:
+                    terminal_status = "BLOCKED"
+                    command_message = "لم يتم تحليل التسجيل أو المرفق: لا يوجد محرك ASR/رؤية مهيأ في هذا المسار. استخدم الإدخال الصوتي المباشر الذي يحول الكلام إلى نص في المتصفح، أو أرسل النص فقط."
+                    stages = [
+                        {"key": "receive", "label": "استلام الطلب", "status": "COMPLETED"},
+                        {"key": "analyze-media", "label": "تحليل الصوت أو الوسائط", "status": "BLOCKED", "description": command_message},
+                    ]
+                    router_test = {"name": "تحليل الصوت/الوسائط", "status": "NOT_CONFIGURED", "detail": command_message}
+                else:
+                    try:
+                        generated = _command_ai_response(command)
+                    except ApiProblem as error:
+                        terminal_status = "BLOCKED" if error.status == 503 else "FAILED"
+                        command_message = error.message
+                        stages = [
+                            {"key": "receive", "label": "استلام الطلب", "status": "COMPLETED"},
+                            {"key": "generate", "label": "إنشاء رد بالموديل", "status": "BLOCKED" if terminal_status == "BLOCKED" else "FAILED", "description": command_message},
+                        ]
+                        router_test = {"name": "AI Router completion", "status": "NOT_CONFIGURED" if terminal_status == "BLOCKED" else "FAIL", "detail": command_message}
+                    else:
+                        response_text = generated["response"]
+                        did_execute = True
+                        stages = [
+                            {"key": "receive", "label": "استلام النص", "status": "COMPLETED"},
+                            {"key": "generate", "label": f"توليد الرد باستخدام {generated['model']}", "status": "COMPLETED"},
+                            {"key": "assistant_response", "label": "رد NADA AI", "status": "COMPLETED", "result": response_text},
+                            {"key": "persist", "label": "حفظ الرد في تقرير التنفيذ", "status": "COMPLETED"},
+                        ]
+                        router_test = {"name": "AI Router completion", "status": "PASS", "detail": f"أعاد النموذج {generated['model']} نصاً غير فارغ."}
+                        command_message = "وصل رد فعلي من AI Router وحُفظ في تقرير التنفيذ."
                 finished_dt = datetime.now(timezone.utc)
-                report["status"] = "SUCCESS"
+                report["status"] = terminal_status
                 report["finished_at"] = finished_dt.isoformat(timespec="seconds")
                 report["duration_ms"] = max(0, int((finished_dt - started_dt).total_seconds() * 1000))
-                report["steps"] = [{**step, "started_at": report["started_at"], "finished_at": report["finished_at"], "description": step["label"]} for step in stages] or [{"key": "receive", "label": "استلام الأمر", "status": "COMPLETED", "started_at": report["started_at"], "finished_at": report["finished_at"], "description": "تم تسجيل الأمر في محرك التنفيذ."}]
-                report["tests"] = [{"name": "HTTP 200", "status": "PASS", "detail": "استجاب endpoint الأوامر بنجاح."}, {"name": "Database Test", "status": "PASS", "detail": "تم الحفظ أو الفحص عبر قاعدة البيانات الفعلية."}, {"name": "Build Test", "status": "NOT_TESTED", "detail": "لم يتم الاختبار داخل أمر التشغيل."}, {"name": "UI Test", "status": "NOT_TESTED", "detail": "لم يتم الاختبار داخل أمر التشغيل."}, {"name": "Voice Test", "status": "PASS" if source == "live-voice" else "NOT_TESTED", "detail": "وصل الأمر من طبقة الصوت." if source == "live-voice" else "لم يتم الاختبار."}]
+                report["steps"] = [{**step, "started_at": report["started_at"], "finished_at": report["finished_at"], "description": step.get("description", step["label"])} for step in stages] or [{"key": "receive", "label": "استلام الأمر", "status": "COMPLETED", "started_at": report["started_at"], "finished_at": report["finished_at"], "description": "تم تسجيل الأمر في محرك التنفيذ."}]
+                report["tests"] = [
+                    {"name": "HTTP/API", "status": "PASS", "detail": "تم استلام الطلب وإرجاع تقريره."},
+                    {"name": "Database persistence", "status": "PASS", "detail": "حُفظ تقرير التنفيذ في قاعدة التطبيق."},
+                    router_test,
+                    {"name": "Build Test", "status": "NOT_TESTED", "detail": "لم يتم اختبار البناء داخل أمر التشغيل."},
+                    {"name": "UI Test", "status": "NOT_TESTED", "detail": "لم يتم اختبار الواجهة داخل أمر التشغيل."},
+                    {"name": "Arabic voice input/output", "status": "NOT_TESTED", "detail": "حالة المصدر الصوتي لا تثبت نجاح التعرف أو القراءة الصوتية."},
+                ]
                 if created_page:
                     report["changes"] = [{"type": "database", "target": "workspace_pages", "description": "حفظ أو تحديث الصفحة فعلياً."}, {"type": "api", "target": "/api/commands", "description": "إرجاع تقرير التنفيذ والصفحة."}]
                     report["snapshot"] = _execution_snapshot(project_root, store, execution_id)
                     report["preview_url"] = f"{os.environ.get('PUBLIC_PREVIEW_URL', '')}/#pages" if os.environ.get("PUBLIC_PREVIEW_URL") else ""
+                elif response_text:
+                    report["changes"] = [{"type": "database", "target": "execution_reports", "description": "حفظ النص الذي أعاده AI Router داخل تقرير التنفيذ."}]
                 store.update_execution_report(report)
                 with store.connect() as db:
-                    store.log_activity(db, actor=actor, action="command.executed" if created_page else "command.received", module="command_bar", object_type="workspace_page" if created_page else "command", object_id=created_page["id"] if created_page else new_id(), result=json.dumps({"source": source, "command": command[:500], "audio_attached": bool(audio_base64), "attachment_attached": bool(attachment_base64), "attachment_name": attachment_name, "attachment_type": attachment_type, "stages": stages}, ensure_ascii=False))
-                return {"accepted": True, "executed": bool(created_page), "execution_id": execution_id, "report": report, "command": command, "source": source, "audio_attached": bool(audio_base64), "attachment_attached": bool(attachment_base64), "page": created_page, "stages": stages, "message": "تم تنفيذ الأمر وحفظ الصفحة فعلياً." if created_page else "تم استلام الأمر والمرفق وتحويلهما إلى مركز التنفيذ."}
+                    store.log_activity(db, actor=actor, action="command.executed" if did_execute else "command.blocked" if terminal_status == "BLOCKED" else "command.failed", module="command_bar", object_type="workspace_page" if created_page else "command", object_id=created_page["id"] if created_page else execution_id, status="SUCCESS" if terminal_status == "SUCCESS" else "FAILURE", result=json.dumps({"source": source, "command": command[:500], "audio_attached": bool(audio_base64), "attachment_attached": bool(attachment_base64), "attachment_name": attachment_name, "attachment_type": attachment_type, "stages": stages}, ensure_ascii=False), error=command_message if terminal_status != "SUCCESS" else "")
+                if not command_message:
+                    command_message = "تم تنفيذ الأمر بنجاح." if did_execute else "لم يُنفّذ الطلب."
+                return {"accepted": True, "executed": did_execute, "status": terminal_status, "response": response_text, "execution_id": execution_id, "report": report, "command": command, "source": source, "audio_attached": bool(audio_base64), "attachment_attached": bool(attachment_base64), "page": created_page, "stages": stages, "message": command_message}
             if path == "/api/service-integrations":
                 actor = self._authenticate()
                 payload = self._body()
@@ -1061,6 +1159,8 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             if path == "/api/auth/change-password":
                 nonlocal token
                 self._authenticate()
+                if os.environ.get("OWNER_MASTER_PASSWORD", "").strip():
+                    raise ApiProblem(409, "password_managed_by_environment", "رمز المالك مضبوط كسر OWNER_MASTER_PASSWORD لدى المضيف؛ غيّره من مدير الأسرار هناك. لم يُغيّر التطبيق الرمز.")
                 payload = self._body()
                 if set(payload) - {"current_password", "new_password", "confirm_password"} or not {"current_password", "new_password"}.issubset(payload):
                     raise ApiProblem(400, "invalid_fields", "يلزم إرسال الرمز الحالي والجديد وتأكيده.")
@@ -1069,17 +1169,18 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 confirm_password = payload.get("confirm_password", new_password)
                 if not isinstance(current_password, str) or not hmac.compare_digest(current_password, token):
                     raise ApiProblem(401, "invalid_current_password", "رمز المالك الحالي غير صالح.")
-                if not isinstance(new_password, str) or not re.fullmatch(r"[0-9]{6}", new_password):
-                    raise ApiProblem(400, "invalid_new_password", "يجب أن يتكون الرمز الجديد من ستة أرقام بالضبط.")
+                if not isinstance(new_password, str) or not _valid_rotated_password(new_password):
+                    raise ApiProblem(400, "invalid_new_password", "اختر PIN من ستة أرقام أو رمزاً قوياً من 16 إلى 256 حرفاً بلا مسافات.")
                 if confirm_password != new_password:
                     raise ApiProblem(400, "password_confirmation_mismatch", "تأكيد الرمز الجديد غير مطابق.")
                 if hmac.compare_digest(new_password, token):
                     raise ApiProblem(400, "password_unchanged", "يجب اختيار رمز جديد مختلف عن الرمز الحالي.")
                 token = new_password
-                os.environ["OWNER_MASTER_PASSWORD"] = new_password
                 _persist_password(new_password)
                 return {"changed": True, "message": "تم تغيير رمز المالك وحفظه بشكل دائم على الخادم."}
             if path == "/api/auth/reset-password":
+                if os.environ.get("OWNER_MASTER_PASSWORD", "").strip():
+                    raise ApiProblem(409, "password_managed_by_environment", "رمز المالك مضبوط كسر OWNER_MASTER_PASSWORD لدى المضيف؛ غيّره من مدير الأسرار هناك. لم يُغيّر التطبيق الرمز.")
                 payload = self._body()
                 recovery_code = payload.get("recovery_code")
                 new_password = payload.get("new_password")
@@ -1089,10 +1190,9 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                     raise ApiProblem(503, "recovery_not_configured", "استعادة كلمة السر غير مهيأة؛ يلزم OWNER_RECOVERY_CODE على الخادم.")
                 if not isinstance(recovery_code, str) or not hmac.compare_digest(recovery_code, expected_recovery):
                     raise ApiProblem(401, "invalid_recovery_code", "كود الاسترداد غير صالح.")
-                if not isinstance(new_password, str) or not re.fullmatch(r"[0-9]{6}", new_password) or new_password != confirm_password:
-                    raise ApiProblem(400, "invalid_reset_password", "أدخل رمزاً جديداً من ستة أرقام وتأكيداً مطابقاً.")
+                if not isinstance(new_password, str) or not _valid_rotated_password(new_password) or new_password != confirm_password:
+                    raise ApiProblem(400, "invalid_reset_password", "أدخل PIN من ستة أرقام أو رمزاً قوياً من 16 إلى 256 حرفاً بلا مسافات، مع تأكيد مطابق.")
                 token = new_password
-                os.environ["OWNER_MASTER_PASSWORD"] = new_password
                 _persist_password(new_password)
                 return {"reset": True, "message": "تمت استعادة رمز المالك وحفظه بشكل دائم على الخادم."}
             actor = self._authenticate()
