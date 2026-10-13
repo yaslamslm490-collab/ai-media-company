@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
-from backend.server import load_local_env, make_handler, system_health  # noqa: E402
+from backend.server import _persist_password, load_local_env, make_handler, system_health  # noqa: E402
 from backend.store import Store  # noqa: E402
 
 
@@ -21,6 +21,9 @@ class ApiTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.env_patch = patch.dict(os.environ, {
+            "OWNER_MASTER_PASSWORD": "", "OWNER_API_TOKEN": "", "OWNER_RECOVERY_CODE": "",
+            "COOKIE_SECURE": "", "PUBLIC_BASE_URL": "", "RENDER_EXTERNAL_URL": "",
+            "OWNER_PASSWORD_FILE": str(Path(self.temp.name) / "owner-password.txt"),
             "AI_ROUTER_HEALTH_URL": "", "AI_ROUTER_BASE_URL": "", "AI_ROUTER_CHAT_COMPLETIONS_URL": "", "AI_ROUTER_MODEL": "",
             "AI_ROUTER_API_KEY": "", "OPENAI_API_BASE": "", "OPENAI_API_KEY": "",
             "MANUS_HEALTH_URL": "", "MANUS_API_TOKEN": "", "MANUS_API_KEY": "",
@@ -43,7 +46,8 @@ class ApiTestCase(unittest.TestCase):
         self.temp.cleanup()
         self.env_patch.stop()
 
-    def request(self, method: str, path: str, *, body: dict | None = None, token: str | None = None):
+    def request(self, method: str, path: str, *, body: dict | None = None, token: str | None = None,
+                cookie: str | None = None, origin: str | None = None, forwarded_proto: str | None = None):
         headers = {"Accept": "application/json"}
         data = None
         if body is not None:
@@ -51,9 +55,16 @@ class ApiTestCase(unittest.TestCase):
             data = json.dumps(body).encode()
         if token is not None:
             headers["X-Owner-Token"] = token
+        if cookie is not None:
+            headers["Cookie"] = cookie
+        if origin is not None:
+            headers["Origin"] = origin
+        if forwarded_proto is not None:
+            headers["X-Forwarded-Proto"] = forwarded_proto
         request = Request(self.base + path, data=data, headers=headers, method=method)
         try:
             with urlopen(request, timeout=3) as response:
+                self.last_headers = response.headers
                 raw = response.read()
                 if not raw:
                     return response.status, {}
@@ -62,6 +73,7 @@ class ApiTestCase(unittest.TestCase):
                 except json.JSONDecodeError:
                     return response.status, raw.decode("utf-8", errors="replace")
         except HTTPError as error:
+            self.last_headers = error.headers
             raw = error.read()
             if not raw:
                 return error.code, {}
@@ -375,6 +387,127 @@ class ApiTestCase(unittest.TestCase):
             status, _ = self.request("GET", path)
             self.assertEqual(status, 404, path)
         status, _ = self.request("GET", "/")
+        self.assertEqual(status, 200)
+
+    def test_owner_api_auth_limits_failed_tokens_but_keeps_correct_owner_access(self):
+        for _ in range(5):
+            status, payload = self.request("GET", "/api/dashboard", token="wrong-owner-token")
+            self.assertEqual(status, 401, payload)
+        status, payload = self.request("GET", "/api/dashboard", token="wrong-owner-token")
+        self.assertEqual(status, 429, payload)
+        self.assertEqual(payload["error"]["code"], "too_many_auth_attempts")
+        status, payload = self.request("GET", "/api/dashboard", token=self.token)
+        self.assertEqual(status, 200, payload)
+
+    def test_browser_login_uses_http_only_cookie_and_cookie_auth_requires_same_origin_for_writes(self):
+        origin = self.base.replace("http://", "https://", 1)
+        status, payload = self.request("POST", "/api/auth/login", body={"token": self.token}, origin=origin, forwarded_proto="https")
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload, {"authenticated": True})
+        set_cookie = self.last_headers.get("Set-Cookie", "")
+        self.assertIn("HttpOnly", set_cookie)
+        self.assertIn("SameSite=None", set_cookie)
+        self.assertIn("Secure", set_cookie)
+        self.assertNotIn(self.token, set_cookie)
+        cookie = set_cookie.split(";", 1)[0]
+        status, session = self.request("GET", "/api/auth/session", cookie=cookie)
+        self.assertEqual((status, session["authenticated"]), (200, True))
+        status, dashboard = self.request("GET", "/api/dashboard", cookie=cookie)
+        self.assertEqual(status, 200, dashboard)
+        status, _ = self.request("POST", "/api/tasks", body={"title": "Cookie session task"}, cookie=cookie)
+        self.assertEqual(status, 403)
+        status, task = self.request("POST", "/api/tasks", body={"title": "Cookie session task"}, cookie=cookie, origin=origin, forwarded_proto="https")
+        self.assertEqual(status, 201, task)
+        status, _ = self.request("POST", "/api/tasks", body={"title": "Cross origin task"}, cookie=cookie, origin="https://attacker.example", forwarded_proto="https")
+        self.assertEqual(status, 403)
+        status, _ = self.request("POST", "/api/tasks", body={"title": "Downgrade origin task"}, cookie=cookie, origin=self.base, forwarded_proto="https")
+        self.assertEqual(status, 403)
+
+    def test_browser_logout_revokes_cookie_and_clears_it(self):
+        status, _ = self.request("POST", "/api/auth/login", body={"token": self.token})
+        self.assertEqual(status, 200)
+        cookie = self.last_headers.get("Set-Cookie", "").split(";", 1)[0]
+        status, _ = self.request("POST", "/api/auth/logout", cookie=cookie, origin="https://attacker.example", forwarded_proto="http")
+        self.assertEqual(status, 403)
+        status, session = self.request("GET", "/api/auth/session", cookie=cookie)
+        self.assertEqual((status, session["authenticated"]), (200, True))
+        status, payload = self.request("POST", "/api/auth/logout", cookie=cookie, origin=self.base)
+        self.assertEqual(status, 200, payload)
+        self.assertIn("Max-Age=0", self.last_headers.get("Set-Cookie", ""))
+        status, session = self.request("GET", "/api/auth/session", cookie=cookie)
+        self.assertEqual((status, session["authenticated"]), (200, False))
+        status, _ = self.request("GET", "/api/dashboard", cookie=cookie)
+        self.assertEqual(status, 401)
+
+    def test_owner_login_limits_wrong_password_attempts_and_returns_secure_cookie_when_configured(self):
+        for _ in range(5):
+            status, _ = self.request("POST", "/api/auth/login", body={"token": "wrong-owner-password"})
+            self.assertEqual(status, 401)
+        status, payload = self.request("POST", "/api/auth/login", body={"token": "wrong-owner-password"})
+        self.assertEqual(status, 429, payload)
+        self.assertEqual(payload["error"]["code"], "too_many_auth_attempts")
+        with patch.dict(os.environ, {"COOKIE_SECURE": "true"}):
+            status, _ = self.request("POST", "/api/auth/login", body={"token": self.token})
+        self.assertEqual(status, 200)
+        self.assertIn("Secure", self.last_headers.get("Set-Cookie", ""))
+
+    def test_password_rotation_revokes_existing_browser_sessions_and_issues_replacement(self):
+        status, _ = self.request("POST", "/api/auth/login", body={"token": self.token})
+        self.assertEqual(status, 200)
+        old_cookie = self.last_headers.get("Set-Cookie", "").split(";", 1)[0]
+        replacement = "NADA-rotated-auth-cookie-test-token"
+        body = {"current_password": self.token, "new_password": replacement, "confirm_password": replacement}
+        status, payload = self.request("POST", "/api/auth/change-password", body=body, cookie=old_cookie, origin=self.base)
+        self.assertEqual(status, 200, payload)
+        self.assertNotIn(replacement, json.dumps(payload))
+        new_cookie = self.last_headers.get("Set-Cookie", "").split(";", 1)[0]
+        status, session = self.request("GET", "/api/auth/session", cookie=new_cookie)
+        self.assertEqual((status, session["authenticated"]), (200, True))
+        status, session = self.request("GET", "/api/auth/session", cookie=old_cookie)
+        self.assertEqual((status, session["authenticated"]), (200, False))
+        status, _ = self.request("GET", "/api/dashboard", cookie=new_cookie)
+        self.assertEqual(status, 200)
+
+    def test_owner_recovery_limits_invalid_codes_without_writing_password(self):
+        with patch.dict(os.environ, {"OWNER_RECOVERY_CODE": "test-recovery-code-with-sufficient-entropy"}):
+            payload = {"recovery_code": "wrong-recovery-code", "new_password": "NADA-new-owner-token-2026", "confirm_password": "NADA-new-owner-token-2026"}
+            for _ in range(5):
+                status, _ = self.request("POST", "/api/auth/reset-password", body=payload)
+                self.assertEqual(status, 401)
+            status, response = self.request("POST", "/api/auth/reset-password", body=payload)
+            self.assertEqual(status, 429)
+            self.assertEqual(response["error"]["code"], "too_many_recovery_attempts")
+            self.assertFalse(Path(os.environ["OWNER_PASSWORD_FILE"]).exists())
+
+    def test_password_file_is_atomically_written_with_restrictive_mode(self):
+        destination = Path(os.environ["OWNER_PASSWORD_FILE"])
+        old_umask = os.umask(0o022)
+        try:
+            _persist_password("NADA-test-rotated-owner-token-2026")
+        finally:
+            os.umask(old_umask)
+        self.assertEqual(destination.read_text(encoding="utf-8").strip(), "NADA-test-rotated-owner-token-2026")
+        self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(destination.parent.glob(f".{destination.name}.*")), [])
+
+    def test_password_file_permission_failure_preserves_existing_value(self):
+        destination = Path(os.environ["OWNER_PASSWORD_FILE"])
+        destination.write_text("existing-test-owner-token\n", encoding="utf-8")
+        destination.chmod(0o600)
+        with patch("backend.server.os.fchmod", side_effect=PermissionError("simulated permission failure")):
+            with self.assertRaises(PermissionError):
+                _persist_password("replacement-test-owner-token")
+        self.assertEqual(destination.read_text(encoding="utf-8"), "existing-test-owner-token\n")
+        self.assertEqual(list(destination.parent.glob(f".{destination.name}.*")), [])
+
+    def test_failed_password_persistence_does_not_rotate_in_memory_token(self):
+        body = {"current_password": self.token, "new_password": "NADA-replacement-owner-token-2026", "confirm_password": "NADA-replacement-owner-token-2026"}
+        with patch("backend.server._persist_password", side_effect=OSError("simulated storage failure")):
+            status, payload = self.request("POST", "/api/auth/change-password", body=body, token=self.token)
+        self.assertEqual(status, 500, payload)
+        self.assertEqual(payload["error"]["code"], "internal_error")
+        self.assertNotIn("simulated storage failure", json.dumps(payload))
+        status, _ = self.request("GET", "/api/dashboard", token=self.token)
         self.assertEqual(status, 200)
 
 
