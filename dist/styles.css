@@ -84,3 +84,5 @@
 .global-search-result .status-pill{margin-top:1px}
 .global-search-count{color:#778297;font-size:9px;padding:8px 7px 2px}
 @media(max-width:560px){.global-search-results{position:fixed;top:62px;left:12px;right:12px;inset-inline-start:auto;width:auto;max-height:65vh}.topbar-actions{position:static}}
+
+.execution-report-card.blocked{border-color:var(--orange)}.execution-response{margin:12px 0;padding:14px;border:1px solid var(--line);background:var(--panel-2);border-radius:12px;color:var(--text)}.execution-response h4{margin:0 0 7px;font-size:12px;color:var(--accent)}.execution-response p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;font-size:12px}@media(max-width:600px){.execution-response{padding:11px}.execution-response p{font-size:11px}}

@@ -5,7 +5,7 @@ import os
 import tempfile
 import threading
 import unittest
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -21,7 +21,8 @@ class ApiTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.env_patch = patch.dict(os.environ, {
-            "AI_ROUTER_HEALTH_URL": "", "AI_ROUTER_API_KEY": "", "OPENAI_API_BASE": "", "OPENAI_API_KEY": "",
+            "AI_ROUTER_HEALTH_URL": "", "AI_ROUTER_BASE_URL": "", "AI_ROUTER_CHAT_COMPLETIONS_URL": "", "AI_ROUTER_MODEL": "",
+            "AI_ROUTER_API_KEY": "", "OPENAI_API_BASE": "", "OPENAI_API_KEY": "",
             "MANUS_HEALTH_URL": "", "MANUS_API_TOKEN": "", "MANUS_API_KEY": "",
             "GITHUB_HEALTH_URL": "", "GITHUB_TOKEN": "", "GITHUB_USE_CLI": "", "EXTERNAL_HEALTH_URLS": "",
         })
@@ -292,6 +293,83 @@ class ApiTestCase(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(history["decisions"][0]["decision"], decision)
 
+    def test_text_command_generates_and_persists_response_using_local_mock_router(self):
+        class MockRouterHandler(BaseHTTPRequestHandler):
+            requests = []
+
+            def log_message(self, _format, *_args):
+                return
+
+            def send_json(self, payload):
+                raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_GET(self):
+                self.send_json({"data": [{"id": "mock-arabic-model"}]})
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length))
+                self.__class__.requests.append({"payload": payload, "authorization": self.headers.get("Authorization")})
+                self.send_json({"choices": [{"message": {"content": "مسودة عربية اختبارية محفوظة في تقرير التنفيذ."}}]})
+
+        MockRouterHandler.requests.clear()
+        router = ThreadingHTTPServer(("127.0.0.1", 0), MockRouterHandler)
+        router_thread = threading.Thread(target=router.serve_forever, daemon=True)
+        router_thread.start()
+        try:
+            base = f"http://127.0.0.1:{router.server_port}/v1"
+            with patch.dict(os.environ, {"AI_ROUTER_BASE_URL": base, "AI_ROUTER_API_KEY": "local-mock-key", "AI_ROUTER_MODEL": "", "AI_ROUTER_CHAT_COMPLETIONS_URL": ""}):
+                status, payload = self.request("POST", "/api/commands", token=self.token, body={
+                    "command": "اكتب مسودة منشور تعريفي عن NADA AI.", "source": "text",
+                })
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["executed"])
+            self.assertEqual(payload["status"], "SUCCESS")
+            self.assertEqual(payload["response"], "مسودة عربية اختبارية محفوظة في تقرير التنفيذ.")
+            self.assertEqual(payload["report"]["status"], "SUCCESS")
+            response_step = next(step for step in payload["report"]["steps"] if step["key"] == "assistant_response")
+            self.assertEqual(response_step["result"], payload["response"])
+            generation_step = next(step for step in payload["report"]["steps"] if step["key"] == "generate")
+            self.assertIn("mock-arabic-model", generation_step["label"])
+            self.assertEqual(MockRouterHandler.requests[0]["authorization"], "Bearer local-mock-key")
+            stored = Store(Path(self.temp.name) / "test.sqlite3").list_execution_reports(limit=1)[0]
+            self.assertEqual(stored["steps"][2]["result"], payload["response"])
+            voice_test = next(test for test in stored["tests"] if test["name"] == "Arabic voice input/output")
+            self.assertEqual(voice_test["status"], "NOT_TESTED")
+        finally:
+            router.shutdown()
+            router.server_close()
+            router_thread.join(timeout=3)
+
+    def test_text_command_without_router_is_blocked_not_reported_as_success(self):
+        status, payload = self.request("POST", "/api/commands", token=self.token, body={
+            "command": "اكتب مسودة محتوى تجريبية.", "source": "live-voice",
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["accepted"])
+        self.assertFalse(payload["executed"])
+        self.assertEqual(payload["status"], "BLOCKED")
+        self.assertEqual(payload["report"]["status"], "BLOCKED")
+        self.assertIn("AI_ROUTER_BASE_URL", payload["message"])
+        self.assertEqual(payload["report"]["tests"][-1]["status"], "NOT_TESTED")
+        stored = Store(Path(self.temp.name) / "test.sqlite3").list_execution_reports(limit=1)[0]
+        self.assertEqual(stored["status"], "BLOCKED")
+
+    def test_untranscribed_audio_upload_is_not_claimed_as_processed(self):
+        status, payload = self.request("POST", "/api/commands", token=self.token, body={
+            "command": "", "source": "audio-recorder", "audio_base64": "dGVzdA==",
+        })
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["executed"])
+        self.assertEqual(payload["status"], "BLOCKED")
+        self.assertIn("لا يوجد محرك ASR", payload["message"])
+        self.assertEqual(payload["report"]["tests"][-1]["status"], "NOT_TESTED")
+
     def test_static_server_does_not_expose_backend_database_or_environment_files(self):
         for path in ["/backend/store.py", "/data/secret.sqlite3", "/.env", "/tests/test_api.py"]:
             status, _ = self.request("GET", path)
@@ -309,6 +387,99 @@ class AuthNotConfiguredTest(unittest.TestCase):
             try:
                 request = Request(f"http://127.0.0.1:{server.server_port}/api/dashboard", headers={"X-Owner-Token": "123456"})
                 with urlopen(request, timeout=3) as response:
+                    self.assertEqual(response.status, 200)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_render_style_owner_api_token_change_survives_process_restart_on_configured_disk(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {
+            "OWNER_MASTER_PASSWORD": "", "OWNER_API_TOKEN": "render-test-owner-token",
+            "OWNER_PASSWORD_FILE": str(Path(temp) / "durable" / "owner-password.txt"),
+        }):
+            db_path = Path(temp) / "db.sqlite3"
+
+            def start_server():
+                instance = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(root=ROOT, db_path=db_path))
+                worker = threading.Thread(target=instance.serve_forever, daemon=True)
+                worker.start()
+                return instance, worker
+
+            def stop_server(instance, worker):
+                instance.shutdown()
+                instance.server_close()
+                worker.join(timeout=3)
+
+            server, thread = start_server()
+            try:
+                rotated = "NADA-rotated-owner-token-2026"
+                body = json.dumps({"current_password": "render-test-owner-token", "new_password": rotated, "confirm_password": rotated}).encode()
+                request = Request(f"http://127.0.0.1:{server.server_port}/api/auth/change-password", data=body,
+                                  headers={"Content-Type": "application/json", "X-Owner-Token": "render-test-owner-token"}, method="POST")
+                with urlopen(request, timeout=3) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertTrue(json.loads(response.read())["changed"])
+            finally:
+                stop_server(server, thread)
+
+            os.environ["OWNER_MASTER_PASSWORD"] = ""
+            restarted, restarted_thread = start_server()
+            try:
+                request = Request(f"http://127.0.0.1:{restarted.server_port}/api/dashboard", headers={"X-Owner-Token": rotated})
+                with urlopen(request, timeout=3) as response:
+                    self.assertEqual(response.status, 200)
+                old_request = Request(f"http://127.0.0.1:{restarted.server_port}/api/dashboard", headers={"X-Owner-Token": "render-test-owner-token"})
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(old_request, timeout=3)
+                self.assertEqual(raised.exception.code, 401)
+                self.assertEqual(Path(os.environ["OWNER_PASSWORD_FILE"]).stat().st_mode & 0o777, 0o600)
+            finally:
+                stop_server(restarted, restarted_thread)
+
+    def test_environment_managed_owner_password_requires_host_secret_rotation(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {
+            "OWNER_MASTER_PASSWORD": "123456", "OWNER_API_TOKEN": "",
+            "OWNER_PASSWORD_FILE": str(Path(temp) / "owner-password.txt"),
+        }):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3"))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                body = json.dumps({"current_password": "123456", "new_password": "654321", "confirm_password": "654321"}).encode()
+                request = Request(f"http://127.0.0.1:{server.server_port}/api/auth/change-password", data=body,
+                                  headers={"Content-Type": "application/json", "X-Owner-Token": "123456"}, method="POST")
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(request, timeout=3)
+                self.assertEqual(raised.exception.code, 409)
+                error = json.loads(raised.exception.read())
+                self.assertEqual(error["error"]["code"], "password_managed_by_environment")
+                self.assertFalse(Path(os.environ["OWNER_PASSWORD_FILE"]).exists())
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_password_rotation_rejects_weak_non_pin_without_changing_owner_token(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {
+            "OWNER_MASTER_PASSWORD": "", "OWNER_API_TOKEN": "",
+            "OWNER_PASSWORD_FILE": str(Path(temp) / "owner-password.txt"),
+        }):
+            current = "owner-token-for-rotation-tests"
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3", owner_token=current))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                body = json.dumps({"current_password": current, "new_password": "weak-pass-123", "confirm_password": "weak-pass-123"}).encode()
+                request = Request(f"http://127.0.0.1:{server.server_port}/api/auth/change-password", data=body,
+                                  headers={"Content-Type": "application/json", "X-Owner-Token": current}, method="POST")
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(request, timeout=3)
+                self.assertEqual(raised.exception.code, 400)
+                self.assertEqual(json.loads(raised.exception.read())["error"]["code"], "invalid_new_password")
+                self.assertFalse(Path(os.environ["OWNER_PASSWORD_FILE"]).exists())
+                dashboard_request = Request(f"http://127.0.0.1:{server.server_port}/api/dashboard", headers={"X-Owner-Token": current})
+                with urlopen(dashboard_request, timeout=3) as response:
                     self.assertEqual(response.status, 200)
             finally:
                 server.shutdown()

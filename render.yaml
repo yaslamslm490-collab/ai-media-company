@@ -23,5 +23,7 @@ services:
         value: "false"
       - key: AI_MEDIA_DB_PATH
         value: /var/data/dashboard.sqlite3
+      - key: OWNER_PASSWORD_FILE
+        value: /var/data/owner-password.txt
       - key: OWNER_API_TOKEN
         sync: false
