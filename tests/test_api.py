@@ -441,6 +441,14 @@ class ApiTestCase(unittest.TestCase):
         status, _ = self.request("GET", "/")
         self.assertEqual(status, 200)
 
+    def test_static_shell_assets_and_docker_copy_contract_are_complete(self):
+        for path in ["/styles.css", "/frontend/app.js", "/frontend/api.js", "/manifest.json", "/service-worker.js", "/brand-mark.svg"]:
+            status, _ = self.request("GET", path)
+            self.assertEqual(status, 200, path)
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        for asset in ("manifest.json", "service-worker.js", "brand-mark.svg"):
+            self.assertIn(asset, dockerfile)
+
     def test_owner_api_auth_limits_failed_tokens_but_keeps_correct_owner_access(self):
         for _ in range(5):
             status, payload = self.request("GET", "/api/dashboard", token="wrong-owner-token")

@@ -18,7 +18,7 @@ RUN python3 -m pip install --no-cache-dir --disable-pip-version-check -r require
 COPY --chown=app:app backend ./backend
 COPY --chown=app:app frontend ./frontend
 COPY --chown=app:app scripts/build.py ./scripts/build.py
-COPY --chown=app:app index.html styles.css manus-routes.json app.js ./
+COPY --chown=app:app index.html styles.css manus-routes.json manifest.json service-worker.js brand-mark.svg app.js ./
 COPY --chown=root:root scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN python3 scripts/build.py \
     && chown -R app:app /app \
