@@ -39,6 +39,22 @@ const state = {
 };
 const pageContent = $('#page-content');
 const titles = new Map();
+const runtimeModes = initRuntimeModes({onChange: async ({apiRoot}) => {
+  setRuntimeApiRoot(apiRoot);
+  state.authorized = false;
+  state.dashboard = null;
+  state.health = null;
+  updateAuthUI();
+  try {
+    state.health = await api.health();
+    renderHealth();
+    await renderPage(state.page);
+    toast('تم التحويل إلى الوضع النشط وفحص الخادم الفعلي.');
+  } catch (error) {
+    toast(`الوضع المحدد غير متاح: ${apiFailure(error)}`, 'error');
+  }
+}});
+setRuntimeApiRoot(runtimeModes.apiRootFor());
 
 async function refreshIntegrationAccountList() {
   const host = $('#integration-account-results', pageContent);
@@ -373,11 +389,12 @@ let recordedChunks = [];
 let inlineAttachment = null;
 let voiceEngine = null;
 let speechReader = null;
+let commandRecognition = null;
 function setVoiceState(stateName) {
   const labels = {ready: '🔵 جاهز', listening: '🎙️ يستمع', processing: '🧠 يعالج', speaking: '🔊 يتحدث'};
   const node = $('#voice-status'); if (node) { node.textContent = labels[stateName] || labels.ready; node.className = `voice-status ${stateName}`; }
   const wave = $('#voice-waveform'); if (wave) wave.hidden = stateName !== 'speaking';
-  const mute = $('#voice-mute'); if (mute) mute.hidden = !voiceEngine?.running;
+  const mute = $('#voice-mute'); if (mute) { mute.hidden = !voiceEngine?.running; mute.textContent = voiceEngine?.muted ? '🔊' : '🔇'; mute.title = voiceEngine?.muted ? 'إلغاء كتم الرد الصوتي' : 'كتم الرد الصوتي'; mute.setAttribute('aria-label', mute.title); }
   const toggle = $('#voice-live-toggle'); if (toggle) { toggle.classList.toggle('voice-active', Boolean(voiceEngine?.running)); toggle.title = voiceEngine?.running ? 'إيقاف المحادثة الصوتية الحرة' : 'بدء المحادثة الصوتية الحرة'; }
 }
 async function handleLiveVoiceTranscript(text) {
@@ -395,7 +412,7 @@ function installVoiceConversation() {
     try { await voiceEngine.start(); toast('المحادثة الصوتية مفعلة؛ تحدث الآن.'); }
     catch (error) { setVoiceState('ready'); toast(error.message || 'تعذر تفعيل المحادثة الصوتية.', 'error'); }
   });
-  $('#voice-mute').addEventListener('click', () => { voiceEngine.mute(); toast('تم كتم الرد الصوتي؛ سيستمر الاستماع.'); });
+  $('#voice-mute').addEventListener('click', () => { const muted = voiceEngine.toggleMute(); toast(muted ? 'تم كتم الرد الصوتي؛ سيستمر الاستماع.' : 'تم إلغاء كتم الرد الصوتي.'); });
   setVoiceState('ready');
 }
 function setReaderState(stateName) {
@@ -474,14 +491,16 @@ function installCommandBar() {
     const reader = new FileReader(); reader.onload = () => { inlineAttachment = {name: file.name, type: file.type, data: reader.result}; setCommandMeta('command-attachment-name', `مرفق: ${file.name}`); }; reader.readAsDataURL(file);
   });
   $('#command-mic').addEventListener('click', () => {
+    if (commandRecognition) { commandRecognition.abort(); commandRecognition = null; $('#command-mic').classList.remove('is-listening'); setCommandMeta('command-recording-state', 'تم إيقاف الاستماع'); return; }
     const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Recognition) return toast('الإدخال الصوتي المباشر غير مدعوم؛ استخدم زر التسجيل الاحتياطي.', 'error');
     const recognition = new Recognition(); recognition.lang = 'ar-SA'; recognition.interimResults = true; recognition.continuous = false; let finalText = '';
-    recognition.onstart = () => { $('#command-mic').classList.add('is-listening'); setCommandMeta('command-recording-state', 'يستمع بالعربية…'); };
+    commandRecognition = recognition;
+    recognition.onstart = () => { $('#command-mic').classList.add('is-listening'); $('#command-mic').title = 'إيقاف الاستماع'; setCommandMeta('command-recording-state', 'يستمع بالعربية…'); };
     recognition.onresult = (event) => { finalText = [...event.results].map((result) => result[0].transcript).join(''); $('#command-input').value = finalText; autosizeCommand(); };
-    recognition.onerror = () => toast('تعذر التعرف الصوتي؛ استخدم التسجيل الاحتياطي.', 'error');
-    recognition.onend = () => { $('#command-mic').classList.remove('is-listening'); setCommandMeta('command-recording-state', 'جاهز'); if (finalText.trim()) sendCommand(finalText, 'stt'); };
-    recognition.start();
+    recognition.onerror = (event) => { if (event.error !== 'aborted') toast(event.error === 'not-allowed' ? 'تم رفض صلاحية الميكروفون؛ اسمح بها من إعدادات المتصفح.' : 'تعذر التعرف الصوتي؛ استخدم التسجيل الاحتياطي.', 'error'); };
+    recognition.onend = () => { commandRecognition = null; $('#command-mic').classList.remove('is-listening'); $('#command-mic').title = 'إدخال صوتي عربي مباشر'; setCommandMeta('command-recording-state', 'جاهز'); if (finalText.trim()) sendCommand(finalText, 'stt'); };
+    try { recognition.start(); } catch (error) { commandRecognition = null; toast('تعذر بدء الاستماع الصوتي؛ أعد المحاولة.', 'error'); }
   });
 }
 function installRecorder() {
@@ -958,23 +977,6 @@ installRecorder();
 installVoiceConversation();
 installSpeechReader();
 installResponseActions();
-
-const runtimeModes = initRuntimeModes({onChange: async ({apiRoot}) => {
-  setRuntimeApiRoot(apiRoot);
-  state.authorized = false;
-  state.dashboard = null;
-  state.health = null;
-  updateAuthUI();
-  try {
-    state.health = await api.health();
-    renderHealth();
-    await renderPage(state.page);
-    toast('تم التحويل إلى الوضع النشط وفحص الخادم الفعلي.');
-  } catch (error) {
-    toast(`الوضع المحدد غير متاح: ${apiFailure(error)}`, 'error');
-  }
-});
-setRuntimeApiRoot(runtimeModes.apiRootFor());
 
 async function boot() {
   updateAuthUI();
