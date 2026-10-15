@@ -39,6 +39,22 @@ const state = {
 };
 const pageContent = $('#page-content');
 const titles = new Map();
+const runtimeModes = initRuntimeModes({onChange: async ({apiRoot}) => {
+  setRuntimeApiRoot(apiRoot);
+  state.authorized = false;
+  state.dashboard = null;
+  state.health = null;
+  updateAuthUI();
+  try {
+    state.health = await api.health();
+    renderHealth();
+    await renderPage(state.page);
+    toast('تم التحويل إلى الوضع النشط وفحص الخادم الفعلي.');
+  } catch (error) {
+    toast(`الوضع المحدد غير متاح: ${apiFailure(error)}`, 'error');
+  }
+});
+setRuntimeApiRoot(runtimeModes.apiRootFor());
 
 async function refreshIntegrationAccountList() {
   const host = $('#integration-account-results', pageContent);
@@ -958,23 +974,6 @@ installRecorder();
 installVoiceConversation();
 installSpeechReader();
 installResponseActions();
-
-const runtimeModes = initRuntimeModes({onChange: async ({apiRoot}) => {
-  setRuntimeApiRoot(apiRoot);
-  state.authorized = false;
-  state.dashboard = null;
-  state.health = null;
-  updateAuthUI();
-  try {
-    state.health = await api.health();
-    renderHealth();
-    await renderPage(state.page);
-    toast('تم التحويل إلى الوضع النشط وفحص الخادم الفعلي.');
-  } catch (error) {
-    toast(`الوضع المحدد غير متاح: ${apiFailure(error)}`, 'error');
-  }
-});
-setRuntimeApiRoot(runtimeModes.apiRootFor());
 
 async function boot() {
   updateAuthUI();
