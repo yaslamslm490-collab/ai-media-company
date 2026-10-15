@@ -160,6 +160,17 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(payload["report"]["tests"][2]["status"], "NOT_CONFIGURED")
         self.assertIn("GEMINI_API_KEY", payload["message"])
 
+    def test_gemini_attachment_path_uses_mocked_multimodal_request(self):
+        os.environ.update({"GEMINI_API_KEY": "unit-test-key", "GEMINI_MODEL": "model-under-owner-control"})
+        with patch("backend.gemini._request_json", return_value={"candidates": [{"content": {"parts": [{"text": "وصف المرفق"}]}}]}) as request:
+            status, payload = self.request("POST", "/api/commands", token=self.token, body={
+                "command": "حلل الصورة", "source": "text", "attachment_base64": "data:image/png;base64,aGVsbG8=", "attachment_name": "sample.png", "attachment_type": "image/png",
+            })
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "SUCCESS")
+        self.assertEqual(payload["response"], "وصف المرفق")
+        self.assertIn("inlineData", json.dumps(request.call_args.kwargs["body"], ensure_ascii=False))
+
     def test_manus_api_key_uses_official_header_and_limited_health_query(self):
         store = Store(Path(self.temp.name) / "health-manus.sqlite3")
         store.initialize()

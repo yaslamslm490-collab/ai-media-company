@@ -435,13 +435,15 @@ def _employee_ai_response(employee: dict[str, Any], message: str, company_store:
     return {"response": content[:12000], "model": primary}
 
 
-def _command_ai_response(message: str, integration_store: IntegrationStore | None = None) -> dict[str, str]:
+def _command_ai_response(message: str, integration_store: IntegrationStore | None = None, *, attachment_base64: str = "", attachment_type: str = "") -> dict[str, str]:
     gemini_env = os.environ
     if gemini_env.get("GEMINI_API_KEY", "").strip() or gemini_env.get("GEMINI_MODEL", "").strip():
         try:
             generated = gemini_generate_content(
                 message,
                 system_instruction="أنت مساعد NADA AI. أجب بالعربية ما لم يطلب المستخدم لغة أخرى. لا تدّع تنفيذ أي إجراء خارجي أو حفظه إلا إذا أعادت الأداة نتيجة نجاح فعلية.",
+                attachment_base64=attachment_base64,
+                attachment_type=attachment_type,
                 environ=gemini_env,
             )
         except GeminiProblem as error:
@@ -796,7 +798,7 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             target = (static_root / relative).resolve()
             allowed = (
                 target == (static_root / "index.html").resolve()
-                or (target.parent == static_root and target.name in {"styles.css", "manus-routes.json", "app.js"})
+                or (target.parent == static_root and target.name in {"styles.css", "manus-routes.json", "manifest.json", "service-worker.js", "brand-mark.svg", "app.js"})
                 or (target.parent == (static_root / "frontend").resolve() and target.suffix == ".js")
             )
             if not allowed or not target.is_file():
@@ -1058,7 +1060,11 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             if path == "/api/collaboration/status":
                 return {"collaboration": self._collaboration_health()}
             if path == "/api/auth/session":
-                return {"authenticated": bool(token and self._owner_session_valid())}
+                return {
+                    "authenticated": bool(token and self._owner_session_valid()),
+                    "configured": bool(token),
+                    "recovery_configured": bool(os.environ.get("OWNER_RECOVERY_CODE", "").strip()),
+                }
             if path == "/api/modules":
                 return {"modules": module_catalog(store, token), "builder_capabilities": BUILDER_CAPABILITIES}
             self._authenticate()
@@ -1313,13 +1319,25 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                     did_execute = True
                     command_message = "نجح فحص التطبيق وقاعدة البيانات محلياً."
                 elif audio_base64 or attachment_base64:
-                    terminal_status = "BLOCKED"
-                    command_message = "لم يتم تحليل التسجيل أو المرفق: لا يوجد محرك ASR/رؤية مهيأ في هذا المسار. استخدم الإدخال الصوتي المباشر الذي يحول الكلام إلى نص في المتصفح، أو أرسل النص فقط."
-                    stages = [
-                        {"key": "receive", "label": "استلام الطلب", "status": "COMPLETED"},
-                        {"key": "analyze-media", "label": "تحليل الصوت أو الوسائط", "status": "BLOCKED", "description": command_message},
-                    ]
-                    router_test = {"name": "تحليل الصوت/الوسائط", "status": "NOT_CONFIGURED", "detail": command_message}
+                    if os.environ.get("GEMINI_API_KEY", "").strip() or os.environ.get("GEMINI_MODEL", "").strip():
+                        try:
+                            generated = _command_ai_response(command, integration_store, attachment_base64=audio_base64 or attachment_base64, attachment_type=attachment_type or "audio/webm")
+                        except ApiProblem as error:
+                            terminal_status = "BLOCKED" if error.status == 503 else "FAILED"
+                            command_message = error.message
+                            stages = [{"key": "receive", "label": "استلام المرفق", "status": "COMPLETED"}, {"key": "analyze-media", "label": "تحليل المرفق عبر Gemini", "status": "BLOCKED" if terminal_status == "BLOCKED" else "FAILED", "description": command_message}]
+                            router_test = {"name": "تحليل الصوت/الوسائط عبر Gemini", "status": "NOT_CONFIGURED" if terminal_status == "BLOCKED" else "FAIL", "detail": command_message}
+                        else:
+                            response_text = generated["response"]
+                            did_execute = True
+                            stages = [{"key": "receive", "label": "استلام المرفق", "status": "COMPLETED"}, {"key": "analyze-media", "label": f"تحليل المرفق عبر {generated['model']}", "status": "COMPLETED"}, {"key": "assistant_response", "label": "رد NADA AI", "status": "COMPLETED", "result": response_text}]
+                            router_test = {"name": "تحليل الصوت/الوسائط عبر Gemini", "status": "PASS", "detail": f"أعاد النموذج {generated['model']} نصاً غير فارغ."}
+                            command_message = "حلّل Gemini المرفق وأعاد ردًا فعليًا."
+                    else:
+                        terminal_status = "BLOCKED"
+                        command_message = "لم يتم تحليل التسجيل أو المرفق: لا يوجد محرك ASR/رؤية مهيأ لهذا المسار، كما أن Gemini غير مهيأ. استخدم الإدخال الصوتي المباشر أو أضف إعداد Gemini إلى أسرار الخادم."
+                        stages = [{"key": "receive", "label": "استلام الطلب", "status": "COMPLETED"}, {"key": "analyze-media", "label": "تحليل الصوت أو الوسائط", "status": "BLOCKED", "description": command_message}]
+                        router_test = {"name": "تحليل الصوت/الوسائط", "status": "NOT_CONFIGURED", "detail": command_message}
                 else:
                     try:
                         generated = _command_ai_response(command, integration_store)

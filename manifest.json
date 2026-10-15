@@ -1,0 +1,14 @@
+{
+  "name": "NADA AI MEDIA OS",
+  "short_name": "NADA AI",
+  "description": "مركز التحكم التشغيلي لـ NADA AI MEDIA OS",
+  "lang": "ar",
+  "dir": "rtl",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#10131c",
+  "theme_color": "#10131c",
+  "icons": [
+    {"src": "/brand-mark.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}
+  ]
+}

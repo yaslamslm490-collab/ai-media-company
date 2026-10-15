@@ -6,6 +6,8 @@ x-goog-api-key header. This module never logs credentials or prompt contents.
 from __future__ import annotations
 
 import json
+import base64
+import binascii
 import os
 import re
 import urllib.error
@@ -72,7 +74,7 @@ def _request_json(url: str, *, api_key: str, body: dict[str, Any]) -> dict[str, 
     return result
 
 
-def generate_content(message: str, *, system_instruction: str = "", environ: dict[str, str] | None = None) -> dict[str, str]:
+def generate_content(message: str, *, system_instruction: str = "", attachment_base64: str = "", attachment_type: str = "", environ: dict[str, str] | None = None) -> dict[str, str]:
     env = environ if environ is not None else os.environ
     config = configuration(env)
     if not config["has_key"]:
@@ -81,8 +83,17 @@ def generate_content(message: str, *, system_instruction: str = "", environ: dic
         raise GeminiProblem(503, "gemini_model_not_configured", "Gemini غير مهيأ: أضف GEMINI_MODEL صالحًا إلى إعدادات الخادم.")
     model = str(config["model"])
     url = f"{config['base_url']}/models/{urllib.parse.quote(model, safe='')}:generateContent"
+    parts: list[dict[str, Any]] = [{"text": message}]
+    if attachment_base64:
+        encoded = attachment_base64.split(",", 1)[1] if attachment_base64.startswith("data:") and "," in attachment_base64 else attachment_base64
+        try:
+            base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise GeminiProblem(400, "gemini_invalid_attachment", "المرفق ليس Base64 صالحًا؛ لم يُرسل إلى Gemini.") from error
+        mime_type = attachment_type.split(";", 1)[0].strip().lower() or "application/octet-stream"
+        parts.append({"inlineData": {"mimeType": mime_type[:120], "data": encoded}})
     body: dict[str, Any] = {
-        "contents": [{"role": "user", "parts": [{"text": message}]}],
+        "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {"responseMimeType": "text/plain"},
     }
     if system_instruction.strip():
