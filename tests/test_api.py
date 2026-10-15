@@ -558,6 +558,27 @@ class ApiTestCase(unittest.TestCase):
 
 
 class AuthNotConfiguredTest(unittest.TestCase):
+    def test_login_accepts_six_digit_master_password_only_when_host_configures_it(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"OWNER_MASTER_PASSWORD": "123456", "OWNER_API_TOKEN": ""}):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3"))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                wrong = Request(f"http://127.0.0.1:{server.server_port}/api/auth/login", data=json.dumps({"token": "654321"}).encode(),
+                                headers={"Content-Type": "application/json"}, method="POST")
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(wrong, timeout=3)
+                self.assertEqual(raised.exception.code, 401)
+                correct = Request(f"http://127.0.0.1:{server.server_port}/api/auth/login", data=json.dumps({"token": "123456"}).encode(),
+                                  headers={"Content-Type": "application/json"}, method="POST")
+                with urlopen(correct, timeout=3) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(json.loads(response.read()), {"authenticated": True})
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
     def test_owner_master_password_accepts_six_digits_from_environment(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"OWNER_MASTER_PASSWORD": "123456", "OWNER_API_TOKEN": ""}):
             server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(root=ROOT, db_path=Path(temp) / "db.sqlite3"))
