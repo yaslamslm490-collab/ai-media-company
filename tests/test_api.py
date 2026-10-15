@@ -449,7 +449,7 @@ class ApiTestCase(unittest.TestCase):
         for asset in ("manifest.json", "service-worker.js", "brand-mark.svg"):
             self.assertIn(asset, dockerfile)
         service_worker = (ROOT / "service-worker.js").read_text(encoding="utf-8")
-        self.assertIn("nada-ai-shell-v2", service_worker)
+        self.assertIn("nada-ai-shell-v3", service_worker)
         for asset in ("/frontend/account-browser.js", "/frontend/company-builder.js", "/brand-mark.svg"):
             self.assertIn(asset, service_worker)
 
