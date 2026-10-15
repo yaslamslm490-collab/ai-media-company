@@ -46,15 +46,16 @@ function render() {
   const local = runtime.health.local;
   const activeOrigin = originFor(runtime.active);
   const localUnavailable = !local?.ok;
+  const activeLabel = runtime.active === 'local' ? 'محلي نشط' : runtime.active === 'cloud' ? 'سحابي نشط' : 'لا يوجد وضع نشط';
   host.innerHTML = `
     <section class="runtime-panel panel" aria-labelledby="runtime-mode-title">
       <div class="panel-heading runtime-panel-heading">
         <div><span class="eyebrow">تشغيل NADA</span><h2 class="panel-title" id="runtime-mode-title">الوضع النشط والاتصال</h2><p class="panel-caption">الـPWA ليست خادماً محلياً؛ الوضع المحلي يعمل فقط إذا كان خادم NADA يعمل فعلياً على الهاتف أو جهاز داخل الشبكة.</p></div>
-        <span class="status-pill ${runtime.active === 'cloud' ? 'production' : 'scheduled'}">${runtime.active === 'cloud' ? 'سحابي نشط' : 'محلي نشط'}</span>
+        <span class="status-pill ${runtime.active === 'cloud' ? 'production' : runtime.active === 'local' ? 'scheduled' : 'draft'}">${activeLabel}</span>
       </div>
       <div class="runtime-cards">
-        <article class="runtime-card ${runtime.active === 'cloud' ? 'active' : ''}"><div><strong>الوضع السحابي</strong><small>${cloud ? statusText(cloud) : 'اضغط فحص السحابي'}</small></div><span class="runtime-dot ${cloud?.ok ? 'online' : cloud ? 'offline' : 'unknown'}"></span><button class="button button-quiet small-button" type="button" data-runtime-probe="cloud">فحص السحابي</button><button class="button button-primary small-button" type="button" data-runtime-activate="cloud" ${cloud?.ok ? '' : 'disabled'}>تشغيل السحابي</button></article>
-        <article class="runtime-card ${runtime.active === 'local' ? 'active' : ''}"><div><strong>الوضع المحلي</strong><small>${local ? statusText(local) : 'اضغط فحص المحلي'}</small></div><span class="runtime-dot ${local?.ok ? 'online' : local ? 'offline' : 'unknown'}"></span><button class="button button-quiet small-button" type="button" data-runtime-probe="local">فحص المحلي</button><button class="button button-primary small-button" type="button" data-runtime-activate="local" ${local?.ok ? '' : 'disabled'}>تشغيل المحلي</button></article>
+        <article class="runtime-card ${runtime.active === 'cloud' ? 'active' : ''}"><div><strong>الوضع السحابي</strong><small>${cloud ? statusText(cloud) : 'اضغط فحص السحابي'}</small></div><span class="runtime-dot ${cloud?.ok ? 'online' : cloud ? 'offline' : 'unknown'}"></span><button class="button button-quiet small-button" type="button" data-runtime-probe="cloud">فحص السحابي</button><button class="button button-primary small-button" type="button" data-runtime-activate="cloud" ${cloud?.ok ? '' : 'disabled'}>تشغيل السحابي</button><button class="button button-quiet small-button" type="button" data-runtime-stop="cloud" ${runtime.active === 'cloud' ? '' : 'disabled'}>إيقاف استخدامه</button></article>
+        <article class="runtime-card ${runtime.active === 'local' ? 'active' : ''}"><div><strong>الوضع المحلي</strong><small>${local ? statusText(local) : 'اضغط فحص المحلي'}</small></div><span class="runtime-dot ${local?.ok ? 'online' : local ? 'offline' : 'unknown'}"></span><button class="button button-quiet small-button" type="button" data-runtime-probe="local">فحص المحلي</button><button class="button button-primary small-button" type="button" data-runtime-activate="local" ${local?.ok ? '' : 'disabled'}>تشغيل المحلي</button><button class="button button-quiet small-button" type="button" data-runtime-stop="local" ${runtime.active === 'local' ? '' : 'disabled'}>إيقاف استخدامه</button></article>
       </div>
       <div class="runtime-controls"><label class="field-group"><span class="field-label">عنوان الخادم المحلي</span><input class="text-field" id="runtime-local-origin" inputmode="url" value="${runtime.localOrigin.replace(/&/g, '&amp;').replace(/\"/g, '&quot;')}" placeholder="http://127.0.0.1:8080" /></label><button class="button button-quiet small-button" type="button" data-runtime-save>حفظ العنوان وفحصه</button></div>
       <div class="runtime-capabilities"><strong>عند توقف السحابي:</strong> يمكن استخدام الواجهة المحلية المدعومة فقط بعد نجاح فحص خادم محلي فعلي. لا تُرسل مفاتيح Gemini إلى الهاتف؛ Gemini يعمل من خادم مؤمّن فقط. ${localUnavailable ? 'حالياً لا يوجد خادم محلي مثبت أو مستجيب.' : `الخادم المحلي مستجيب على ${activeOrigin}.`}</div>
@@ -64,6 +65,14 @@ function render() {
     const mode = button.dataset.runtimeActivate;
     if (!runtime.health[mode]?.ok) return;
     runtime.active = mode; saveSettings(); window.dispatchEvent(new CustomEvent('nada-runtime-changed', {detail: {mode, apiRoot: apiRootFor(mode)}})); render();
+  }));
+  host.querySelectorAll('[data-runtime-stop]').forEach((button) => button.addEventListener('click', () => {
+    const mode = button.dataset.runtimeStop;
+    if (runtime.active !== mode) return;
+    runtime.active = runtime.health.cloud?.ok && mode !== 'cloud' ? 'cloud' : 'none';
+    saveSettings();
+    window.dispatchEvent(new CustomEvent('nada-runtime-changed', {detail: {mode: runtime.active, apiRoot: apiRootFor(runtime.active)}}));
+    render();
   }));
   host.querySelector('[data-runtime-save]')?.addEventListener('click', async () => {
     const value = host.querySelector('#runtime-local-origin')?.value.trim();
