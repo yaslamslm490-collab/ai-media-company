@@ -1,4 +1,5 @@
-import {api, ApiError} from './api.js';
+import {api, ApiError, setRuntimeApiRoot} from './api.js';
+import {initRuntimeModes} from './runtime-modes.js';
 import {formatDate, label, statusClass} from './status.js';
 import {handleCompanyClick, handleCompanySubmit, isCompanyBuilderRoute, isEmployeeRoute, renderCompanyPage} from './company-builder.js';
 import {renderAccountResults, renderAccountSearch} from './account-browser.js';
@@ -957,6 +958,23 @@ installRecorder();
 installVoiceConversation();
 installSpeechReader();
 installResponseActions();
+
+const runtimeModes = initRuntimeModes({onChange: async ({apiRoot}) => {
+  setRuntimeApiRoot(apiRoot);
+  state.authorized = false;
+  state.dashboard = null;
+  state.health = null;
+  updateAuthUI();
+  try {
+    state.health = await api.health();
+    renderHealth();
+    await renderPage(state.page);
+    toast('تم التحويل إلى الوضع النشط وفحص الخادم الفعلي.');
+  } catch (error) {
+    toast(`الوضع المحدد غير متاح: ${apiFailure(error)}`, 'error');
+  }
+});
+setRuntimeApiRoot(runtimeModes.apiRootFor());
 
 async function boot() {
   updateAuthUI();

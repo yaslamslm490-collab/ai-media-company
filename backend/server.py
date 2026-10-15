@@ -611,6 +611,12 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            origin = self.headers.get("Origin", "").strip()
+            if os.environ.get("ALLOW_LOCAL_CORS", "").strip().lower() in {"1", "true", "yes"} and origin:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+                self.send_header("Access-Control-Allow-Headers", "Accept, Content-Type, X-Owner-Token")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
             for name, value in (headers or {}).items():
                 self.send_header(name, value)
             self.end_headers()
@@ -1094,6 +1100,12 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
         def do_OPTIONS(self) -> None:
             self.send_response(204)
             self.send_header("Allow", "GET, POST, PATCH, DELETE, HEAD, OPTIONS")
+            origin = self.headers.get("Origin", "").strip()
+            if os.environ.get("ALLOW_LOCAL_CORS", "").strip().lower() in {"1", "true", "yes"} and origin:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+                self.send_header("Access-Control-Allow-Headers", "Accept, Content-Type, X-Owner-Token")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
             self.send_header("Content-Length", "0")
             self.end_headers()
 

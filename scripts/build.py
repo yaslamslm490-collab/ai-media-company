@@ -15,6 +15,7 @@ ASSETS = (
     "manus-routes.json",
     "app.js",
     "frontend/app.js",
+    "frontend/runtime-modes.js",
     "frontend/voice-engine.js",
     "frontend/api.js",
     "frontend/account-browser.js",

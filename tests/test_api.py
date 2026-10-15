@@ -29,6 +29,7 @@ class ApiTestCase(unittest.TestCase):
             "GEMINI_API_KEY": "", "GEMINI_MODEL": "gemini-1.5-flash",
             "MANUS_HEALTH_URL": "", "MANUS_API_TOKEN": "", "MANUS_API_KEY": "",
             "GITHUB_HEALTH_URL": "", "GITHUB_TOKEN": "", "GITHUB_USE_CLI": "", "EXTERNAL_HEALTH_URLS": "",
+            "ALLOW_LOCAL_CORS": "",
         })
         self.env_patch.start()
         self.token = "test-token-for-owner-access-32-chars"
@@ -110,6 +111,15 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(health["checks"]["backend"], "ONLINE")
         self.assertEqual(health["checks"]["database"], "ERROR")
         self.assertEqual(health["overall"], "ERROR")
+
+    def test_local_cors_is_opt_in_and_never_enabled_by_default(self):
+        status, _ = self.request("OPTIONS", "/api/health", origin="https://example.test")
+        self.assertEqual(status, 204)
+        self.assertIsNone(self.last_headers.get("Access-Control-Allow-Origin"))
+        with patch.dict(os.environ, {"ALLOW_LOCAL_CORS": "true"}):
+            status, _ = self.request("OPTIONS", "/api/health", origin="https://example.test")
+        self.assertEqual(status, 204)
+        self.assertEqual(self.last_headers.get("Access-Control-Allow-Origin"), "https://example.test")
 
     def test_ai_router_falls_back_to_authenticated_openai_compatible_models_endpoint(self):
         store = Store(Path(self.temp.name) / "health-ai.sqlite3")

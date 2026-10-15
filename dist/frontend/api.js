@@ -1,5 +1,11 @@
-const API_ROOT = '/api';
+let API_ROOT = '/api';
 let ownerSessionActive = false;
+
+export function setRuntimeApiRoot(root = '/api') {
+  const value = String(root || '/api').trim().replace(/\/$/, '');
+  API_ROOT = value.endsWith('/api') ? value : `${value}/api`;
+  ownerSessionActive = false;
+}
 
 export class ApiError extends Error {
   constructor(message, status, code, details = {}) {
@@ -22,7 +28,8 @@ async function request(path, {method = 'GET', body, publicEndpoint = false, quer
   let timeoutId;
   try {
     if (controller) timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    const response = await fetch(url, {method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: 'same-origin', cache: 'no-store', signal: controller?.signal});
+    const sameOrigin = url.origin === window.location.origin;
+    const response = await fetch(url, {method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: sameOrigin ? 'same-origin' : 'omit', cache: 'no-store', signal: controller?.signal});
     const payload = await response.json().catch((error) => {
       if (controller?.signal.aborted) throw error;
       return {};
@@ -48,7 +55,7 @@ async function mediaBlob(generationId, kind) {
   const url = new URL(`${API_ROOT}/external-integrations/generations/${encodeURIComponent(generationId)}/${kind}`, window.location.origin);
   let response;
   try {
-    response = await fetch(url, {headers: {Accept: '*/*'}, credentials: 'same-origin', cache: 'no-store'});
+    response = await fetch(url, {headers: {Accept: '*/*'}, credentials: url.origin === window.location.origin ? 'same-origin' : 'omit', cache: 'no-store'});
   } catch (error) {
     throw new ApiError('تعذّر الاتصال بالخادم الخلفي.', 0, 'network_error');
   }
