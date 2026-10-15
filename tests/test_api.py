@@ -448,6 +448,10 @@ class ApiTestCase(unittest.TestCase):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         for asset in ("manifest.json", "service-worker.js", "brand-mark.svg"):
             self.assertIn(asset, dockerfile)
+        service_worker = (ROOT / "service-worker.js").read_text(encoding="utf-8")
+        self.assertIn("nada-ai-shell-v2", service_worker)
+        for asset in ("/frontend/account-browser.js", "/frontend/company-builder.js", "/brand-mark.svg"):
+            self.assertIn(asset, service_worker)
 
     def test_owner_api_auth_limits_failed_tokens_but_keeps_correct_owner_access(self):
         for _ in range(5):

@@ -1,5 +1,17 @@
-const CACHE_NAME = 'nada-ai-shell-v1';
-const SHELL = ['/', '/index.html', '/styles.css', '/frontend/app.js', '/frontend/api.js', '/frontend/status.js', '/frontend/voice-engine.js', '/manifest.json'];
+const CACHE_NAME = 'nada-ai-shell-v2';
+const SHELL = [
+  '/',
+  '/index.html',
+  '/styles.css',
+  '/frontend/app.js',
+  '/frontend/api.js',
+  '/frontend/status.js',
+  '/frontend/voice-engine.js',
+  '/frontend/account-browser.js',
+  '/frontend/company-builder.js',
+  '/brand-mark.svg',
+  '/manifest.json',
+];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));
