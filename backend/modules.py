@@ -7,6 +7,7 @@ MODULES = [
     {"id": "projects", "title": "المشاريع", "group": "التخطيط والتنفيذ", "icon": "▧", "state": "NOT_CONFIGURED"},
     {"id": "ai-team", "title": "فريق الذكاء الاصطناعي", "group": "أنظمة الذكاء الاصطناعي", "icon": "✣", "state": "NOT_CONFIGURED"},
     {"id": "ai-router", "title": "موجّه النماذج", "group": "أنظمة الذكاء الاصطناعي", "icon": "⌘", "state": "NOT_CONFIGURED"},
+    {"id": "gemini", "title": "Google Gemini", "group": "أنظمة الذكاء الاصطناعي", "icon": "✦", "state": "NOT_CONFIGURED"},
     {"id": "manus", "title": "Manus", "group": "أنظمة الذكاء الاصطناعي", "icon": "M", "state": "NOT_CONFIGURED"},
     {"id": "github", "title": "GitHub", "group": "أنظمة الذكاء الاصطناعي", "icon": "⌘", "state": "NOT_CONFIGURED"},
     {"id": "external-integrations", "title": "التكاملات الخارجية", "group": "التكاملات", "icon": "⇄", "state": "READY"},

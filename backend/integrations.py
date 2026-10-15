@@ -110,6 +110,13 @@ class IntegrationStore:
                     secret_ciphertext TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS integration_health_checks (
+                    service_key TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    message TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '',
+                    checked_at TEXT NOT NULL DEFAULT ''
+                );
             """)
             columns = table_columns(db, "external_accounts")
             migrations = {
@@ -152,8 +159,37 @@ class IntegrationStore:
     def manual_snapshot(self, automatic: dict[str, str]) -> list[dict[str, Any]]:
         with self.store.connect() as db:
             rows = {row["service_key"]: dict(row) for row in db.execute("SELECT service_key,label,endpoint,updated_at FROM manual_integrations").fetchall()}
-        keys = ["manus", "github", "external_integrations", "media_vault", "object_storage"]
-        return [{"key": key, "label": key.replace("_", " ").title(), "automatic_status": automatic.get(key, "NOT_CONFIGURED"), "manual_status": "CONFIGURED" if key in rows else "NOT_CONFIGURED", "source": "manual" if key in rows else "automatic", "endpoint": rows.get(key, {}).get("endpoint", ""), "updated_at": rows.get(key, {}).get("updated_at", "")} for key in keys]
+        keys = ["gemini", "manus", "github", "external_integrations", "media_vault", "object_storage"]
+        result = [{"key": key, "label": "Google Gemini" if key == "gemini" else key.replace("_", " ").title(), "automatic_status": automatic.get(key, "NOT_CONFIGURED"), "manual_status": "CONFIGURED" if key in rows else "NOT_CONFIGURED", "source": "manual" if key in rows else "automatic", "endpoint": rows.get(key, {}).get("endpoint", ""), "updated_at": rows.get(key, {}).get("updated_at", "")} for key in keys]
+        gemini = self.gemini_snapshot()
+        result[0].update({"configured": gemini["configured"], "model": gemini["model"], "last_checked_at": gemini["last_checked_at"], "connection_message": gemini["message"]})
+        return result
+
+    def gemini_snapshot(self) -> dict[str, Any]:
+        with self.store.connect() as db:
+            row = db.execute("SELECT status,message,model,checked_at FROM integration_health_checks WHERE service_key=?", ("gemini",)).fetchone()
+        model = os.environ.get("GEMINI_MODEL", "").strip()
+        if model.startswith("models/"):
+            model = model[len("models/"):]
+        configured = bool(os.environ.get("GEMINI_API_KEY", "").strip() and model)
+        return {
+            "key": "gemini",
+            "label": "Google Gemini",
+            "status": "NOT_CONFIGURED" if not configured else (row["status"] if row else "NOT_TESTED"),
+            "configured": configured,
+            "model": model or None,
+            "message": row["message"] if row else ("أضف GEMINI_API_KEY وGEMINI_MODEL إلى أسرار الخادم." if not configured else "لم يُنفّذ اختبار اتصال حي بعد."),
+            "last_checked_at": row["checked_at"] if row and row["checked_at"] else None,
+        }
+
+    def record_gemini_test(self, status: str, message: str, model: str = "") -> None:
+        safe_status = status if status in {"ONLINE", "ERROR", "NOT_CONFIGURED", "NOT_TESTED"} else "ERROR"
+        with self.store.connect() as db:
+            db.execute(
+                "INSERT INTO integration_health_checks(service_key,status,message,model,checked_at) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(service_key) DO UPDATE SET status=excluded.status,message=excluded.message,model=excluded.model,checked_at=excluded.checked_at",
+                ("gemini", safe_status, str(message)[:500], str(model)[:120], utc_now()),
+            )
 
     def upsert_manual(self, payload: dict[str, Any], actor: str) -> dict[str, Any]:
         key = self._text(payload, "service_key", required=True, maximum=80).lower()

@@ -191,7 +191,7 @@ function renderHealth() {
   if (!health) return;
   const allChecks = [
     ['الخادم الخلفي', health.checks.backend], ['قاعدة البيانات', health.checks.database],
-    ['المصادقة', health.checks.authentication], ['موجّه النماذج', health.checks.ai_router],
+    ['المصادقة', health.checks.authentication], ['موجّه النماذج', health.checks.ai_router], ['Google Gemini', health.checks.gemini],
     ['Manus', health.checks.manus], ['GitHub', health.checks.github],
   ];
   const integrations = health.checks.external_integrations;
@@ -205,7 +205,7 @@ function renderHealth() {
 }
 function healthCards(health) {
   if (!health) return '<div class="empty-state"><strong>حالة الصحة غير متاحة</strong>تعذّر الحصول على نتيجة الفحص.</div>';
-  const names = {backend: 'الخادم الخلفي', database: 'قاعدة البيانات', authentication: 'مصادقة المالك', media_vault: 'خزنة مفاتيح الوسائط', object_storage: 'التخزين الدائم', ai_router: 'AI Router', manus: 'Manus', github: 'GitHub', external_integrations: 'التكاملات الخارجية', application_tasks: 'قاعدة مهام NADA AI', manus_api: 'تهيئة Manus API', mcp_endpoint: 'نقطة MCP', mcp_oauth: 'OAuth 2.1 لخادم MCP', mcp_client_activity: 'آخر استخدام ناجح لعميل MCP', chatgpt_connection: 'اتصال ChatGPT الفعلي', public_https: 'عنوان HTTPS لـWebhook'};
+  const names = {backend: 'الخادم الخلفي', database: 'قاعدة البيانات', authentication: 'مصادقة المالك', media_vault: 'خزنة مفاتيح الوسائط', object_storage: 'التخزين الدائم', ai_router: 'AI Router', gemini: 'Google Gemini', manus: 'Manus', github: 'GitHub', external_integrations: 'التكاملات الخارجية', application_tasks: 'قاعدة مهام NADA AI', manus_api: 'تهيئة Manus API', mcp_endpoint: 'نقطة MCP', mcp_oauth: 'OAuth 2.1 لخادم MCP', mcp_client_activity: 'آخر استخدام ناجح لعميل MCP', chatgpt_connection: 'اتصال ChatGPT الفعلي', public_https: 'عنوان HTTPS لـWebhook'};
   const entries = Object.entries(health.checks).filter(([key]) => key !== 'database_engine').flatMap(([key, value]) => value && typeof value === 'object' ? Object.entries(value).map(([name, status]) => [names[name] || `${names[key] || key} · ${name}`, status]) : [[names[key] || key, value]]);
   return `<div class="health-grid">${entries.map(([name, status]) => `<article class="panel health-card"><div class="health-card-top"><span class="health-indicator ${statusClass(status)}"></span><span class="health-card-name">${esc(name)}</span>${statusBadge(status)}</div><p>${esc(status === 'ONLINE' ? 'نجح الفحص الفعلي لهذا المكوّن.' : status === 'OFFLINE' ? 'فشل الاتصال عند آخر فحص.' : status === 'ERROR' ? 'أبلغ الفحص عن خطأ.' : status === 'CONFIGURED' ? 'الإعداد موجود، لكن لم ينجح اختبار اتصال حي بعد.' : status === 'READY' ? 'نقطة OAuth مهيأة محليًا على الخادم؛ هذا لا يثبت ربط ChatGPT.' : status === 'NOT_CHECKED' ? (name === 'اتصال ChatGPT الفعلي' ? 'لم يُثبت اتصال ChatGPT. اسم عميل OAuth المعلن ذاتيًا لا يكفي للتحقق من الهوية.' : name === 'آخر استخدام ناجح لعميل MCP' ? 'لا يوجد طلب ناجح مرصود من عميل OAuth خلال الأيام السبعة الماضية.' : 'لم يُنفّذ أو ينجح فحص حي لهذا المكوّن بعد.') : 'لا يوجد إعداد أو تكامل لهذا المكوّن حتى الآن.')}</p></article>`).join('')}</div><p class="panel-caption health-timestamp">آخر فحص: ${esc(formatDate(health.checked_at))}</p>`;
 }
@@ -236,7 +236,7 @@ function taskStatusChart(counts) {
 function renderSystemList(health) {
   const entries = Object.entries(health?.checks || {});
   return entries.map(([key, value]) => {
-    const title = ({backend: 'Backend', database: 'Database', authentication: 'Authentication', ai_router: 'AI Router', manus: 'Manus', github: 'GitHub', external_integrations: 'External integrations'})[key] || key;
+    const title = ({backend: 'Backend', database: 'Database', authentication: 'Authentication', ai_router: 'AI Router', gemini: 'Google Gemini', manus: 'Manus', github: 'GitHub', external_integrations: 'External integrations'})[key] || key;
     if (value && typeof value === 'object') return Object.entries(value).map(([name, status]) => `<div class="setting-row"><div class="setting-copy"><strong>${esc(title)} · ${esc(name)}</strong><small>نتيجة فحص اتصال حقيقي</small></div>${statusBadge(status)}</div>`).join('');
     return `<div class="setting-row"><div class="setting-copy"><strong>${esc(title)}</strong><small>نتيجة فحص اتصال حقيقي</small></div>${statusBadge(value)}</div>`;
   }).join('');
@@ -305,11 +305,13 @@ async function entityPage(id) {
   return `<section class="panel"><div class="panel-heading"><div><h2 class="panel-title">${esc(config[0])}</h2><div class="panel-caption">سجلات فعلية محفوظة في قاعدة البيانات.</div></div></div>${entityCards(config[1], config[2], 'لا توجد سجلات بعد.')}</section>`;
 }
 function integrationPage(module) {
-  const key = {'ai-router': 'ai_router', manus: 'manus', github: 'github'}[module.id];
+  const key = {'ai-router': 'ai_router', gemini: 'gemini', manus: 'manus', github: 'github'}[module.id];
   const status = state.health?.checks?.[key] || 'NOT_CONFIGURED';
   const detail = module.id === 'manus'
     ? 'يفحص الخادم واجهة Manus API عبر GET /v2/task.list?limit=1 باستخدام مفتاح الخادم؛ لا تُعرض بيانات المهام أو المفتاح في اللوحة.'
-    : module.id === 'ai-router'
+    : module.id === 'gemini'
+      ? 'يستخدم مسار المحادثة الخادمي Google Gemini عند ضبط GEMINI_API_KEY وGEMINI_MODEL؛ لا يظهر المفتاح في المتصفح، وتُعرض نتيجة آخر اختبار فقط إذا حدث فعلاً.'
+      : module.id === 'ai-router'
       ? 'يُظهر الفحص نتيجة نقطة /models لموجّه OpenAI-compatible، عند توفر اعتمادات الخادم.'
       : 'يُظهر الفحص حالة GitHub API باستخدام اعتماد المضيف المهيأ دون كشف رمز الوصول.';
   return `<section class="panel integration-page"><div class="panel-heading"><div><h2 class="panel-title">${esc(module.title)}</h2><div class="panel-caption">حالة اتصال فعلية من الخلفية.</div></div>${statusBadge(status)}</div><p>${esc(detail)}</p><p class="panel-caption">آخر فحص: ${esc(formatDate(state.health?.checked_at))}</p></section>`;
@@ -540,7 +542,7 @@ function installResponseActions() {
 async function modulePage(module) {
   if (isCompanyBuilderRoute(module.id)) return renderCompanyPage(module.id, state);
   if (['ai-team', 'characters', 'projects'].includes(module.id)) return entityPage(module.id);
-  if (['ai-router', 'manus', 'github'].includes(module.id)) return integrationPage(module);
+  if (['ai-router', 'gemini', 'manus', 'github'].includes(module.id)) return integrationPage(module);
   if (module.id === 'external-integrations') return externalIntegrationsPage();
   if (module.id === 'security') return securityPage();
   if (module.id === 'settings') return settingsPage();

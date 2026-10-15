@@ -45,6 +45,7 @@ from backend.store import (
     new_id,
 )
 from backend.integrations import IntegrationProblem, IntegrationStore
+from backend.gemini import GeminiProblem, configuration as gemini_configuration, generate_content as gemini_generate_content
 from backend.media_generators import MediaGenerator
 from backend.collaboration import Collaboration, MCP_PATH, MANUS_WEBHOOK_PATH, MCPProblem, handle_mcp
 from backend.oauth import OAuthError, OAuthProvider, SCOPES
@@ -296,6 +297,7 @@ def system_health(store: Store, owner_token: str, environ: dict[str, str] | None
         "media_vault": "ONLINE" if env.get("AI_MEDIA_VAULT_KEY", "").strip() else "NOT_CONFIGURED",
         "object_storage": "ONLINE" if env.get("MANUS_API_URL", "").strip() and env.get("MANUS_API_KEY", "").strip() else "NOT_CONFIGURED",
         "ai_router": _probe(ai_url, ai_token),
+        "gemini": "NOT_TESTED" if gemini_configuration(env)["configured"] else "NOT_CONFIGURED",
         "manus": _probe(manus_url, manus_token, auth_header="x-manus-api-key", auth_scheme=""),
         "github": _probe(github_url, github_token) if github_token else (_probe_github_cli() if use_github_cli else "NOT_CONFIGURED"),
         "external_integrations": ({name: _probe(url) for name, url in external.items()} if external else "NOT_CONFIGURED"),
@@ -316,6 +318,7 @@ def module_catalog(store: Store, owner_token: str) -> list[dict[str, Any]]:
         "characters": "READY" if store.count_active("characters") else "NOT_CONFIGURED",
         "projects": "READY" if store.count_active("projects") else "NOT_CONFIGURED",
         "ai-router": health["checks"]["ai_router"],
+        "gemini": health["checks"]["gemini"],
         "manus": health["checks"]["manus"],
         "github": health["checks"]["github"],
     }
@@ -432,7 +435,23 @@ def _employee_ai_response(employee: dict[str, Any], message: str, company_store:
     return {"response": content[:12000], "model": primary}
 
 
-def _command_ai_response(message: str) -> dict[str, str]:
+def _command_ai_response(message: str, integration_store: IntegrationStore | None = None) -> dict[str, str]:
+    gemini_env = os.environ
+    if gemini_env.get("GEMINI_API_KEY", "").strip() or gemini_env.get("GEMINI_MODEL", "").strip():
+        try:
+            generated = gemini_generate_content(
+                message,
+                system_instruction="أنت مساعد NADA AI. أجب بالعربية ما لم يطلب المستخدم لغة أخرى. لا تدّع تنفيذ أي إجراء خارجي أو حفظه إلا إذا أعادت الأداة نتيجة نجاح فعلية.",
+                environ=gemini_env,
+            )
+        except GeminiProblem as error:
+            if integration_store:
+                integration_store.record_gemini_test("ERROR" if error.status != 503 else "NOT_CONFIGURED", error.message, str(gemini_configuration(gemini_env)["model"]))
+            raise ApiProblem(error.status, error.code, error.message) from error
+        if integration_store:
+            integration_store.record_gemini_test("ONLINE", "نجح اختبار المحادثة وأعاد Gemini نصاً غير فارغاً.", generated["model"])
+        return generated
+
     env = os.environ
     key = env.get("AI_ROUTER_API_KEY", "") or env.get("OPENAI_API_KEY", "")
     chat_url = env.get("AI_ROUTER_CHAT_COMPLETIONS_URL", "").strip()
@@ -1032,6 +1051,8 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             path = urllib.parse.urlsplit(self.path).path
             if path == "/api/health":
                 health = system_health(store, token)
+                health["checks"]["gemini"] = integration_store.gemini_snapshot()["status"]
+                health["integration_details"] = {"gemini": integration_store.gemini_snapshot()}
                 health["checks"]["collaboration"] = self._collaboration_health()
                 return health
             if path == "/api/collaboration/status":
@@ -1078,14 +1099,18 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 return {"query": term, "displayed_count": sum(len(group["results"]) for group in groups), "groups": groups}
             if path == "/api/dashboard":
                 health = system_health(store, token)
+                health["checks"]["gemini"] = integration_store.gemini_snapshot()["status"]
+                health["integration_details"] = {"gemini": integration_store.gemini_snapshot()}
                 health["checks"]["collaboration"] = self._collaboration_health()
                 dashboard = store.dashboard(health)
                 dashboard["company_builder"] = company_store.summary()
                 return dashboard
             if path == "/api/service-integrations":
                 health = system_health(store, token)
+                gemini = integration_store.gemini_snapshot()
+                health["checks"]["gemini"] = gemini["status"]
                 automatic = {key: value for key, value in health["checks"].items() if isinstance(value, str)}
-                return {"integrations": integration_store.manual_snapshot(automatic)}
+                return {"integrations": integration_store.manual_snapshot(automatic), "details": {"gemini": gemini}}
             if path == "/api/company-builder/summary":
                 return {"summary": company_store.summary()}
             if path == "/api/company/structure":
@@ -1297,7 +1322,7 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                     router_test = {"name": "تحليل الصوت/الوسائط", "status": "NOT_CONFIGURED", "detail": command_message}
                 else:
                     try:
-                        generated = _command_ai_response(command)
+                        generated = _command_ai_response(command, integration_store)
                     except ApiProblem as error:
                         terminal_status = "BLOCKED" if error.status == 503 else "FAILED"
                         command_message = error.message

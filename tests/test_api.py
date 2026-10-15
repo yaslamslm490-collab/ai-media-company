@@ -26,6 +26,7 @@ class ApiTestCase(unittest.TestCase):
             "OWNER_PASSWORD_FILE": str(Path(self.temp.name) / "owner-password.txt"),
             "AI_ROUTER_HEALTH_URL": "", "AI_ROUTER_BASE_URL": "", "AI_ROUTER_CHAT_COMPLETIONS_URL": "", "AI_ROUTER_MODEL": "",
             "AI_ROUTER_API_KEY": "", "OPENAI_API_BASE": "", "OPENAI_API_KEY": "",
+            "GEMINI_API_KEY": "", "GEMINI_MODEL": "", "GEMINI_BASE_URL": "",
             "MANUS_HEALTH_URL": "", "MANUS_API_TOKEN": "", "MANUS_API_KEY": "",
             "GITHUB_HEALTH_URL": "", "GITHUB_TOKEN": "", "GITHUB_USE_CLI": "", "EXTERNAL_HEALTH_URLS": "",
         })
@@ -118,6 +119,46 @@ class ApiTestCase(unittest.TestCase):
             health = system_health(store, self.token, environ=env)
         self.assertEqual(health["checks"]["ai_router"], "ONLINE")
         probe.assert_any_call("https://router.example/v1/models", "test-ai-key")
+
+    def test_gemini_is_not_claimed_online_without_server_configuration(self):
+        status, payload = self.request("GET", "/api/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["checks"]["gemini"], "NOT_CONFIGURED")
+        self.assertEqual(payload["integration_details"]["gemini"]["last_checked_at"], None)
+
+        status, integrations = self.request("GET", "/api/service-integrations", token=self.token)
+        self.assertEqual(status, 200)
+        gemini = next(item for item in integrations["integrations"] if item["key"] == "gemini")
+        self.assertEqual(gemini["automatic_status"], "NOT_CONFIGURED")
+        self.assertFalse(gemini["configured"])
+
+    def test_gemini_command_uses_server_key_and_persists_safe_online_status(self):
+        fake_key = "unit-test-key"
+        os.environ.update({"GEMINI_API_KEY": fake_key, "GEMINI_MODEL": "model-under-owner-control"})
+        with patch("backend.gemini._request_json", return_value={"candidates": [{"content": {"parts": [{"text": "رد Gemini تجريبي"}]}}]}) as request:
+            status, payload = self.request("POST", "/api/commands", token=self.token, body={"command": "اكتب ردًا تجريبيًا", "source": "text"})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "SUCCESS")
+        self.assertEqual(payload["response"], "رد Gemini تجريبي")
+        request.assert_called_once()
+        url, kwargs = request.call_args.args[0], request.call_args.kwargs
+        self.assertIn("model-under-owner-control", url)
+        self.assertEqual(kwargs["api_key"], fake_key)
+        self.assertNotIn(fake_key, json.dumps(payload, ensure_ascii=False))
+
+        status, health = self.request("GET", "/api/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(health["checks"]["gemini"], "ONLINE")
+        self.assertEqual(health["integration_details"]["gemini"]["model"], "model-under-owner-control")
+        self.assertTrue(health["integration_details"]["gemini"]["last_checked_at"])
+
+    def test_gemini_configuration_error_is_blocked_without_router_fallback(self):
+        os.environ["GEMINI_MODEL"] = "model-without-key"
+        status, payload = self.request("POST", "/api/commands", token=self.token, body={"command": "اختبار إعداد Gemini", "source": "text"})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "BLOCKED")
+        self.assertEqual(payload["report"]["tests"][2]["status"], "NOT_CONFIGURED")
+        self.assertIn("GEMINI_API_KEY", payload["message"])
 
     def test_manus_api_key_uses_official_header_and_limited_health_query(self):
         store = Store(Path(self.temp.name) / "health-manus.sqlite3")
