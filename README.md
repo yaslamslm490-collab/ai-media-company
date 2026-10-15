@@ -65,6 +65,7 @@ python3 -m backend.seed
 للتطوير المحلي تُخزن الأسرار في بيئة الخادم أو `.env` محلي مستثنى من Git؛ وفي WebDev تُدخل عبر لوحة الأسرار المحمية، ولا تُضمّن في `dist/` أو المتصفح أو Git أو سجل النشاط. يتحقق الخادم فعلياً من اتصال النظام قبل أن يعرض `ONLINE`.
 
 - **AI Router:** `AI_ROUTER_BASE_URL` و`AI_ROUTER_API_KEY`، واختيارياً `AI_ROUTER_MODEL` أو `AI_ROUTER_CHAT_COMPLETIONS_URL`. يقبل أيضاً إعداد `OPENAI_API_BASE` و`OPENAI_API_KEY` المتوافق القديم. يُفحص `/models`؛ ويستدعي `/api/commands` نقطة `/chat/completions` لتوليد رد محادثة عند توفر الموجّه.
+- **Gemini:** عند غياب إعداد AI Router، يقرأ الخادم `GEMINI_API_KEY` و`GEMINI_MODEL` من أسرار الخادم فقط ويستخدم endpoint المتوافق مع OpenAI في Gemini. لا يُعرض المفتاح للمتصفح أو GitHub، وتظهر الحالة `CONFIGURED_NOT_TESTED` حتى يُجرى اختبار حي محدود بموافقة المالك. يحافظ AI Router على الأولوية إذا كان مهيأً.
 - **Manus:** `MANUS_API_KEY` أو `MANUS_API_TOKEN`، مع فحص محدود عبر `GET /v2/task.list?limit=1`. لا تُعرض الحالة متصلة دون مفتاح صالح واستجابة ناجحة؛ إدارة الشركة لا تستخدم Manus كموظف داخلي.
 - **التعاون المدمج:** `/mcp` مدعوم بـOAuth 2.1/PKCE وDCR؛ عيّن `OWNER_API_TOKEN` داخل مدير أسرار المضيف للموافقة على الربط، ويكتشف Render عنوان HTTPS تلقائيًا من `RENDER_EXTERNAL_URL`. `MANUS_API_KEY` مطلوب فقط للإرسال/المزامنة الحية. راجع [دليل التعاون](docs/collaboration.md)؛ `NADA_MCP_TOKEN` باقٍ للتوافق القديم فقط.
 - **GitHub:** اعتماد مضيف `gh` عند تفعيل `GITHUB_USE_CLI=true`، أو `GITHUB_TOKEN` و`GITHUB_HEALTH_URL`. سحب/دفع المستودع أثناء التطوير لا يعني تلقائياً أن تكامل التطبيق نفسه متصل.

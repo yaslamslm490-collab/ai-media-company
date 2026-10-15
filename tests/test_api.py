@@ -372,6 +372,49 @@ class ApiTestCase(unittest.TestCase):
         stored = Store(Path(self.temp.name) / "test.sqlite3").list_execution_reports(limit=1)[0]
         self.assertEqual(stored["status"], "BLOCKED")
 
+    def test_text_command_falls_back_to_gemini_mock_when_router_is_unconfigured(self):
+        class MockGeminiHandler(BaseHTTPRequestHandler):
+            requests = []
+
+            def log_message(self, _format, *_args):
+                return
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length))
+                self.__class__.requests.append({"payload": payload, "authorization": self.headers.get("Authorization")})
+                raw = json.dumps({"choices": [{"message": {"content": "رد Gemini Mock من مسار المحادثة."}}]}, ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        MockGeminiHandler.requests.clear()
+        gemini = ThreadingHTTPServer(("127.0.0.1", 0), MockGeminiHandler)
+        gemini_thread = threading.Thread(target=gemini.serve_forever, daemon=True)
+        gemini_thread.start()
+        key = "mock" + "-credential-local"
+        try:
+            with patch.dict(os.environ, {
+                "AI_ROUTER_BASE_URL": "", "AI_ROUTER_CHAT_COMPLETIONS_URL": "", "AI_ROUTER_API_KEY": "", "AI_ROUTER_MODEL": "",
+                "OPENAI_API_BASE": "", "OPENAI_API_KEY": "", "GEMINI_API_KEY": key, "GEMINI_MODEL": "gemini-test-model",
+                "GEMINI_OPENAI_BASE_URL": f"http://127.0.0.1:{gemini.server_port}",
+            }):
+                status, payload = self.request("POST", "/api/commands", token=self.token, body={
+                    "command": "اكتب رداً عبر Gemini.", "source": "text",
+                })
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["status"], "SUCCESS")
+            self.assertEqual(payload["response"], "رد Gemini Mock من مسار المحادثة.")
+            self.assertEqual(MockGeminiHandler.requests[0]["authorization"], f"Bearer {key}")
+            self.assertEqual(MockGeminiHandler.requests[0]["payload"]["model"], "gemini-test-model")
+            self.assertNotIn(key, json.dumps(payload, ensure_ascii=False))
+        finally:
+            gemini.shutdown()
+            gemini.server_close()
+            gemini_thread.join(timeout=3)
+
     def test_untranscribed_audio_upload_is_not_claimed_as_processed(self):
         status, payload = self.request("POST", "/api/commands", token=self.token, body={
             "command": "", "source": "audio-recorder", "audio_base64": "dGVzdA==",

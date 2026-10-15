@@ -45,6 +45,7 @@ from backend.store import (
     new_id,
 )
 from backend.integrations import IntegrationProblem, IntegrationStore
+from backend.gemini import GeminiAdapter, GeminiError, GeminiNotConfigured
 from backend.media_generators import MediaGenerator
 from backend.collaboration import Collaboration, MCP_PATH, MANUS_WEBHOOK_PATH, MCPProblem, handle_mcp
 from backend.oauth import OAuthError, OAuthProvider, SCOPES
@@ -264,12 +265,10 @@ def system_health(store: Store, owner_token: str, environ: dict[str, str] | None
         database_status = "ERROR"
 
     ai_url = env.get("AI_ROUTER_HEALTH_URL", "").strip()
-    ai_token = env.get("AI_ROUTER_API_KEY", "")
-    if not ai_url:
-        router_base = (env.get("AI_ROUTER_BASE_URL", "") or env.get("OPENAI_API_BASE", "")).strip().rstrip("/")
-        ai_token = ai_token or env.get("OPENAI_API_KEY", "")
-        if router_base:
-            ai_url = f"{router_base}/models"
+    router_config = _ai_router_config(env)
+    ai_token = router_config["key"]
+    if not ai_url and router_config["base"]:
+        ai_url = f"{router_config['base']}/models"
     manus_url = env.get("MANUS_HEALTH_URL", "").strip()
     manus_token = env.get("MANUS_API_TOKEN", "") or env.get("MANUS_API_KEY", "")
     if not manus_url and manus_token:
@@ -296,6 +295,7 @@ def system_health(store: Store, owner_token: str, environ: dict[str, str] | None
         "media_vault": "ONLINE" if env.get("AI_MEDIA_VAULT_KEY", "").strip() else "NOT_CONFIGURED",
         "object_storage": "ONLINE" if env.get("MANUS_API_URL", "").strip() and env.get("MANUS_API_KEY", "").strip() else "NOT_CONFIGURED",
         "ai_router": _probe(ai_url, ai_token),
+        "gemini": "CONFIGURED_NOT_TESTED" if env.get("GEMINI_API_KEY", "").strip() and env.get("GEMINI_MODEL", "").strip() else "NOT_CONFIGURED",
         "manus": _probe(manus_url, manus_token, auth_header="x-manus-api-key", auth_scheme=""),
         "github": _probe(github_url, github_token) if github_token else (_probe_github_cli() if use_github_cli else "NOT_CONFIGURED"),
         "external_integrations": ({name: _probe(url) for name, url in external.items()} if external else "NOT_CONFIGURED"),
@@ -359,6 +359,20 @@ def _as_bool(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _ai_router_config(env: dict[str, str]) -> dict[str, str]:
+    """Resolve the existing AI Router without exposing credentials."""
+    key = env.get("AI_ROUTER_API_KEY", "") or env.get("OPENAI_API_KEY", "")
+    chat_url = env.get("AI_ROUTER_CHAT_COMPLETIONS_URL", "").strip()
+    base = (env.get("AI_ROUTER_BASE_URL", "") or env.get("OPENAI_API_BASE", "")).strip().rstrip("/")
+    if not base:
+        health_url = env.get("AI_ROUTER_HEALTH_URL", "").strip()
+        if health_url.endswith("/models"):
+            base = health_url[:-len("/models")].rstrip("/")
+    if not chat_url and base:
+        chat_url = f"{base}/chat/completions"
+    return {"key": key, "chat_url": chat_url, "base": base, "model": env.get("AI_ROUTER_MODEL", "").strip()}
+
+
 def _router_json_request(url: str, *, token: str = "", body: dict[str, Any] | None = None) -> dict[str, Any]:
     headers = {"Accept": "application/json", "User-Agent": "AI-Media-OS/1.0"}
     data = None
@@ -387,26 +401,13 @@ def _router_json_request(url: str, *, token: str = "", body: dict[str, Any] | No
 
 def _employee_ai_response(employee: dict[str, Any], message: str, company_store: CompanyBuilderStore) -> dict[str, str]:
     env = os.environ
-    key = env.get("AI_ROUTER_API_KEY", "") or env.get("OPENAI_API_KEY", "")
-    chat_url = env.get("AI_ROUTER_CHAT_COMPLETIONS_URL", "").strip()
-    base = (env.get("AI_ROUTER_BASE_URL", "") or env.get("OPENAI_API_BASE", "")).strip().rstrip("/")
-    if not base:
-        health_url = env.get("AI_ROUTER_HEALTH_URL", "").strip()
-        if health_url.endswith("/models"):
-            base = health_url[:-len("/models")].rstrip("/")
-    if not chat_url and base:
-        chat_url = f"{base}/chat/completions"
-    if not chat_url:
-        raise ApiProblem(503, "ai_router_not_configured", "موجّه النماذج غير مهيأ. لم يتم توليد إجابة تجريبية.")
-
+    router_config = _ai_router_config(env)
+    key, chat_url, base = router_config["key"], router_config["chat_url"], router_config["base"]
     model = (employee.get("preferred_model") or "").strip()
-    if not model and base:
+    if chat_url and not model and base:
         models_payload = _router_json_request(f"{base}/models", token=key)
         models = models_payload.get("data", [])
         model = next((item.get("id", "") for item in models if isinstance(item, dict) and re.fullmatch(r"[A-Za-z0-9._:/-]{1,120}", str(item.get("id", "")))), "") if isinstance(models, list) else ""
-    if not model:
-        raise ApiProblem(503, "ai_router_model_unconfigured", "لم يعثر موجّه النماذج على نموذج صالح للاختبار.")
-
     source_context = company_store.authorized_knowledge_context(employee["id"])
     context = "\n\n".join(f"[{source['name']}]\n{source['content']}" for source in source_context)
     system_prompt = (employee.get("system_prompt") or "").strip()
@@ -414,6 +415,15 @@ def _employee_ai_response(employee: dict[str, Any], message: str, company_store:
         system_prompt = f"أنت {employee['name']}، دورك {employee.get('role','مساعد AI')}. أجب بدقة وفق الوصف والمهام المصرح بها فقط."
     if context:
         system_prompt += "\n\nمراجع معرفة مصرح بها لهذا الموظف:\n" + context
+    if not chat_url:
+        try:
+            return GeminiAdapter.from_env(env).chat(message, system_prompt=system_prompt)
+        except GeminiNotConfigured as error:
+            raise ApiProblem(503, "ai_router_not_configured", "لم يُهيأ AI Router أو Gemini في بيئة الخادم.") from error
+        except GeminiError as error:
+            raise ApiProblem(502, "gemini_request_failed", str(error)) from error
+    if not model:
+        raise ApiProblem(503, "ai_router_model_unconfigured", "لم يعثر موجّه النماذج على نموذج صالح للاختبار.")
     primary = model
     fallback = (employee.get("fallback_model") or "").strip()
     payload = {"model": primary, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": message}]}
@@ -434,19 +444,16 @@ def _employee_ai_response(employee: dict[str, Any], message: str, company_store:
 
 def _command_ai_response(message: str) -> dict[str, str]:
     env = os.environ
-    key = env.get("AI_ROUTER_API_KEY", "") or env.get("OPENAI_API_KEY", "")
-    chat_url = env.get("AI_ROUTER_CHAT_COMPLETIONS_URL", "").strip()
-    base = (env.get("AI_ROUTER_BASE_URL", "") or env.get("OPENAI_API_BASE", "")).strip().rstrip("/")
-    if not base:
-        health_url = env.get("AI_ROUTER_HEALTH_URL", "").strip()
-        if health_url.endswith("/models"):
-            base = health_url[:-len("/models")].rstrip("/")
-    if not chat_url and base:
-        chat_url = f"{base}/chat/completions"
+    router_config = _ai_router_config(env)
+    key, chat_url, base = router_config["key"], router_config["chat_url"], router_config["base"]
     if not chat_url:
-        raise ApiProblem(503, "ai_router_not_configured", "موجّه النماذج غير مهيأ. لم يتم توليد المحتوى؛ أضف عنوان AI_ROUTER_BASE_URL ومفتاح AI_ROUTER_API_KEY في إعدادات الخادم السرية.")
-
-    model = env.get("AI_ROUTER_MODEL", "").strip()
+        try:
+            return GeminiAdapter.from_env(env).chat(message, system_prompt="أنت مساعد NADA AI. أجب بالعربية ما لم يطلب المستخدم لغة أخرى. أنشئ المحتوى المطلوب بوضوح، ولا تدّع تنفيذ أي إجراء خارجي أو حفظه إلا إذا أعادت الأداة نتيجة نجاح فعلية.")
+        except GeminiNotConfigured as error:
+            raise ApiProblem(503, "ai_not_configured", "لم يُهيأ AI Router أو Gemini في بيئة الخادم؛ اضبط AI_ROUTER_BASE_URL وAI_ROUTER_API_KEY أو GEMINI_API_KEY وGEMINI_MODEL في إعدادات الخادم السرية.") from error
+        except GeminiError as error:
+            raise ApiProblem(502, "gemini_request_failed", str(error)) from error
+    model = router_config["model"]
     if not model and base:
         models_payload = _router_json_request(f"{base}/models", token=key)
         models = models_payload.get("data", [])
