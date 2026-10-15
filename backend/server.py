@@ -296,6 +296,7 @@ def system_health(store: Store, owner_token: str, environ: dict[str, str] | None
         "media_vault": "ONLINE" if env.get("AI_MEDIA_VAULT_KEY", "").strip() else "NOT_CONFIGURED",
         "object_storage": "ONLINE" if env.get("MANUS_API_URL", "").strip() and env.get("MANUS_API_KEY", "").strip() else "NOT_CONFIGURED",
         "ai_router": _probe(ai_url, ai_token),
+        "gemini": _gemini_health(env),
         "manus": _probe(manus_url, manus_token, auth_header="x-manus-api-key", auth_scheme=""),
         "github": _probe(github_url, github_token) if github_token else (_probe_github_cli() if use_github_cli else "NOT_CONFIGURED"),
         "external_integrations": ({name: _probe(url) for name, url in external.items()} if external else "NOT_CONFIGURED"),
@@ -316,6 +317,7 @@ def module_catalog(store: Store, owner_token: str) -> list[dict[str, Any]]:
         "characters": "READY" if store.count_active("characters") else "NOT_CONFIGURED",
         "projects": "READY" if store.count_active("projects") else "NOT_CONFIGURED",
         "ai-router": health["checks"]["ai_router"],
+        "gemini": health["checks"]["gemini"],
         "manus": health["checks"]["manus"],
         "github": health["checks"]["github"],
     }
@@ -385,8 +387,96 @@ def _router_json_request(url: str, *, token: str = "", body: dict[str, Any] | No
         raise ApiProblem(502, "ai_router_unavailable", "تعذّر الاتصال بموجّه النماذج أو قراءة استجابته.") from error
 
 
+def _gemini_json_request(url: str, *, api_key: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Call the official Gemini REST API without returning or logging the API key."""
+    separator = "&" if "?" in url else "?"
+    request_url = f"{url}{separator}key={urllib.parse.quote(api_key, safe='')}"
+    headers = {"Accept": "application/json", "User-Agent": "AI-Media-OS/1.0"}
+    data = None
+    method = "GET"
+    if body is not None:
+        method = "POST"
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(request_url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            raw = response.read(1_000_000)
+        result = json.loads(raw.decode("utf-8"))
+        if not isinstance(result, dict):
+            raise ApiProblem(502, "gemini_invalid_response", "أعاد Gemini استجابة غير صالحة.")
+        return result
+    except urllib.error.HTTPError as error:
+        if error.code in {401, 403}:
+            raise ApiProblem(502, "gemini_auth_failed", "رفض Google مفتاح Gemini أو صلاحياته.") from error
+        if error.code == 404:
+            raise ApiProblem(503, "gemini_model_unavailable", "نموذج Gemini المطلوب غير متاح عبر واجهة Google الحالية.") from error
+        raise ApiProblem(502, "gemini_request_failed", f"رفض Gemini الطلب (HTTP {error.code}).") from error
+    except ApiProblem:
+        raise
+    except (urllib.error.URLError, TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ApiProblem(502, "gemini_unavailable", "تعذّر الاتصال بـ Google Gemini أو قراءة استجابته.") from error
+
+
+def _gemini_model(api_key: str, requested: str = "") -> str:
+    model = (requested or os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")).strip().removeprefix("models/")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", model):
+        raise ApiProblem(400, "gemini_model_invalid", "اسم نموذج Gemini غير صالح.")
+    payload = _gemini_json_request("https://generativelanguage.googleapis.com/v1beta/models", api_key=api_key)
+    models = payload.get("models")
+    available = {
+        str(item.get("name", "")).removeprefix("models/")
+        for item in models if isinstance(item, dict)
+        and "generateContent" in (item.get("supportedGenerationMethods") or [])
+    } if isinstance(models, list) else set()
+    if model not in available:
+        raise ApiProblem(503, "gemini_model_unavailable", f"نموذج Gemini المطلوب غير متاح: {model}.")
+    return model
+
+
+def _gemini_response(message: str, *, system_prompt: str, requested_model: str = "") -> dict[str, str]:
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise ApiProblem(503, "gemini_not_configured", "Gemini غير مهيأ. أضف GEMINI_API_KEY إلى أسرار الخادم؛ لم تُنشأ إجابة وهمية.")
+    model = _gemini_model(api_key, requested_model)
+    result = _gemini_json_request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(model, safe='')}:generateContent",
+        api_key=api_key,
+        body={
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"role": "user", "parts": [{"text": message}]}],
+        },
+    )
+    candidates = result.get("candidates")
+    parts = candidates[0].get("content", {}).get("parts", []) if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict) else []
+    content = "\n".join(str(part.get("text", "")) for part in parts if isinstance(part, dict) and part.get("text")).strip()
+    if not content:
+        raise ApiProblem(502, "gemini_empty_response", "لم يُعِد Gemini نصاً صالحاً؛ لم يُسجّل الطلب على أنه مكتمل.")
+    return {"response": content[:12000], "model": model}
+
+
+def _gemini_health(environ: dict[str, str]) -> str:
+    api_key = environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        return "NOT_CONFIGURED"
+    try:
+        _gemini_model(api_key, environ.get("GEMINI_MODEL", "gemini-1.5-flash"))
+        return "ONLINE"
+    except ApiProblem as error:
+        return "ERROR" if error.code == "gemini_auth_failed" else "OFFLINE"
+
+
 def _employee_ai_response(employee: dict[str, Any], message: str, company_store: CompanyBuilderStore) -> dict[str, str]:
     env = os.environ
+    source_context = company_store.authorized_knowledge_context(employee["id"])
+    context = "\n\n".join(f"[{source['name']}]\n{source['content']}" for source in source_context)
+    system_prompt = (employee.get("system_prompt") or "").strip()
+    if not system_prompt:
+        system_prompt = f"أنت {employee['name']}، دورك {employee.get('role','مساعد AI')}. أجب بدقة وفق الوصف والمهام المصرح بها فقط."
+    if context:
+        system_prompt += "\n\nمراجع معرفة مصرح بها لهذا الموظف:\n" + context
+    if env.get("GEMINI_API_KEY", "").strip():
+        return _gemini_response(message, system_prompt=system_prompt, requested_model=employee.get("preferred_model", ""))
     key = env.get("AI_ROUTER_API_KEY", "") or env.get("OPENAI_API_KEY", "")
     chat_url = env.get("AI_ROUTER_CHAT_COMPLETIONS_URL", "").strip()
     base = (env.get("AI_ROUTER_BASE_URL", "") or env.get("OPENAI_API_BASE", "")).strip().rstrip("/")
@@ -407,13 +497,6 @@ def _employee_ai_response(employee: dict[str, Any], message: str, company_store:
     if not model:
         raise ApiProblem(503, "ai_router_model_unconfigured", "لم يعثر موجّه النماذج على نموذج صالح للاختبار.")
 
-    source_context = company_store.authorized_knowledge_context(employee["id"])
-    context = "\n\n".join(f"[{source['name']}]\n{source['content']}" for source in source_context)
-    system_prompt = (employee.get("system_prompt") or "").strip()
-    if not system_prompt:
-        system_prompt = f"أنت {employee['name']}، دورك {employee.get('role','مساعد AI')}. أجب بدقة وفق الوصف والمهام المصرح بها فقط."
-    if context:
-        system_prompt += "\n\nمراجع معرفة مصرح بها لهذا الموظف:\n" + context
     primary = model
     fallback = (employee.get("fallback_model") or "").strip()
     payload = {"model": primary, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": message}]}
@@ -434,6 +517,12 @@ def _employee_ai_response(employee: dict[str, Any], message: str, company_store:
 
 def _command_ai_response(message: str) -> dict[str, str]:
     env = os.environ
+    if env.get("GEMINI_API_KEY", "").strip():
+        return _gemini_response(
+            message,
+            system_prompt="أنت مساعد NADA AI. أجب بالعربية ما لم يطلب المستخدم لغة أخرى. أنشئ المحتوى المطلوب بوضوح، ولا تدّع تنفيذ أي إجراء خارجي أو حفظه إلا إذا أعادت الأداة نتيجة نجاح فعلية.",
+            requested_model=env.get("GEMINI_MODEL", "gemini-1.5-flash"),
+        )
     key = env.get("AI_ROUTER_API_KEY", "") or env.get("OPENAI_API_KEY", "")
     chat_url = env.get("AI_ROUTER_CHAT_COMPLETIONS_URL", "").strip()
     base = (env.get("AI_ROUTER_BASE_URL", "") or env.get("OPENAI_API_BASE", "")).strip().rstrip("/")
@@ -1256,7 +1345,8 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                 command_message = ""
                 terminal_status = "SUCCESS"
                 did_execute = False
-                router_test = {"name": "AI Router", "status": "NOT_TESTED", "detail": "لم يُستدعَ موجّه النماذج في هذا الأمر."}
+                provider_name = "Gemini" if os.environ.get("GEMINI_API_KEY", "").strip() else "AI Router"
+                router_test = {"name": provider_name, "status": "NOT_TESTED", "detail": f"لم يُستدعَ {provider_name} في هذا الأمر."}
                 if re.search(r"أنشئ\s+صفحة(?:\s+اختبار)?\s+جديدة", command):
                     stages = [
                         {"key": "understand", "label": "فهم الأمر", "status": "COMPLETED"},
@@ -1305,7 +1395,7 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                             {"key": "receive", "label": "استلام الطلب", "status": "COMPLETED"},
                             {"key": "generate", "label": "إنشاء رد بالموديل", "status": "BLOCKED" if terminal_status == "BLOCKED" else "FAILED", "description": command_message},
                         ]
-                        router_test = {"name": "AI Router completion", "status": "NOT_CONFIGURED" if terminal_status == "BLOCKED" else "FAIL", "detail": command_message}
+                        router_test = {"name": f"{provider_name} completion", "status": "NOT_CONFIGURED" if terminal_status == "BLOCKED" else "FAIL", "detail": command_message}
                     else:
                         response_text = generated["response"]
                         did_execute = True
@@ -1315,8 +1405,8 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
                             {"key": "assistant_response", "label": "رد NADA AI", "status": "COMPLETED", "result": response_text},
                             {"key": "persist", "label": "حفظ الرد في تقرير التنفيذ", "status": "COMPLETED"},
                         ]
-                        router_test = {"name": "AI Router completion", "status": "PASS", "detail": f"أعاد النموذج {generated['model']} نصاً غير فارغ."}
-                        command_message = "وصل رد فعلي من AI Router وحُفظ في تقرير التنفيذ."
+                        router_test = {"name": f"{provider_name} completion", "status": "PASS", "detail": f"أعاد النموذج {generated['model']} نصاً غير فارغ."}
+                        command_message = f"وصل رد فعلي من {provider_name} وحُفظ في تقرير التنفيذ."
                 finished_dt = datetime.now(timezone.utc)
                 report["status"] = terminal_status
                 report["finished_at"] = finished_dt.isoformat(timespec="seconds")

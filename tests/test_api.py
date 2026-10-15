@@ -26,6 +26,7 @@ class ApiTestCase(unittest.TestCase):
             "OWNER_PASSWORD_FILE": str(Path(self.temp.name) / "owner-password.txt"),
             "AI_ROUTER_HEALTH_URL": "", "AI_ROUTER_BASE_URL": "", "AI_ROUTER_CHAT_COMPLETIONS_URL": "", "AI_ROUTER_MODEL": "",
             "AI_ROUTER_API_KEY": "", "OPENAI_API_BASE": "", "OPENAI_API_KEY": "",
+            "GEMINI_API_KEY": "", "GEMINI_MODEL": "gemini-1.5-flash",
             "MANUS_HEALTH_URL": "", "MANUS_API_TOKEN": "", "MANUS_API_KEY": "",
             "GITHUB_HEALTH_URL": "", "GITHUB_TOKEN": "", "GITHUB_USE_CLI": "", "EXTERNAL_HEALTH_URLS": "",
         })
@@ -118,6 +119,41 @@ class ApiTestCase(unittest.TestCase):
             health = system_health(store, self.token, environ=env)
         self.assertEqual(health["checks"]["ai_router"], "ONLINE")
         probe.assert_any_call("https://router.example/v1/models", "test-ai-key")
+
+    def test_gemini_health_requires_key_and_accepts_only_available_generation_model(self):
+        store = Store(Path(self.temp.name) / "health-gemini.sqlite3")
+        store.initialize()
+        self.assertEqual(system_health(store, self.token, environ={})["checks"]["gemini"], "NOT_CONFIGURED")
+        with patch("backend.server._gemini_json_request", return_value={"models": [{"name": "models/gemini-1.5-flash", "supportedGenerationMethods": ["generateContent"]}]}):
+            health = system_health(store, self.token, environ={"GEMINI_API_KEY": "hidden-test-key", "GEMINI_MODEL": "gemini-1.5-flash"})
+        self.assertEqual(health["checks"]["gemini"], "ONLINE")
+
+    def test_gemini_command_uses_official_shape_and_never_returns_key(self):
+        calls = []
+        def fake_gemini(url, *, api_key, body=None):
+            calls.append((url, api_key, body))
+            if body is None:
+                return {"models": [{"name": "models/gemini-1.5-flash", "supportedGenerationMethods": ["generateContent"]}]}
+            return {"candidates": [{"content": {"parts": [{"text": "رد ندى العربي الحقيقي في اختبار الخادم."}]}}]}
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "hidden-test-key", "GEMINI_MODEL": "gemini-1.5-flash"}), patch("backend.server._gemini_json_request", side_effect=fake_gemini):
+            status, payload = self.request("POST", "/api/commands", token=self.token, body={"command": "عرّف ندى بالعربية.", "source": "text"})
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["executed"])
+        self.assertEqual(payload["response"], "رد ندى العربي الحقيقي في اختبار الخادم.")
+        self.assertEqual(payload["report"]["steps"][1]["label"], "توليد الرد باستخدام gemini-1.5-flash")
+        self.assertEqual(calls[0][1], "hidden-test-key")
+        self.assertNotIn("hidden-test-key", json.dumps(payload, ensure_ascii=False))
+        self.assertEqual(calls[1][2]["contents"][0]["role"], "user")
+
+    def test_gemini_unavailable_model_is_blocked_not_reported_as_success(self):
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "hidden-test-key", "GEMINI_MODEL": "gemini-1.5-flash"}), patch(
+            "backend.server._gemini_json_request", return_value={"models": [{"name": "models/other-model", "supportedGenerationMethods": ["generateContent"]}]}
+        ):
+            status, payload = self.request("POST", "/api/commands", token=self.token, body={"command": "اختبر Gemini.", "source": "text"})
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["executed"])
+        self.assertEqual(payload["status"], "BLOCKED")
+        self.assertIn("غير متاح", payload["message"])
 
     def test_manus_api_key_uses_official_header_and_limited_health_query(self):
         store = Store(Path(self.temp.name) / "health-manus.sqlite3")

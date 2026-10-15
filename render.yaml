@@ -27,3 +27,7 @@ services:
         value: /var/data/owner-password.txt
       - key: OWNER_API_TOKEN
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-1.5-flash
