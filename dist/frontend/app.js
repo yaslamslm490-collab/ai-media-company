@@ -681,7 +681,7 @@ $('#owner-profile').addEventListener('click', () => openModal('auth-overlay'));
 $('#sidebar-navigation').addEventListener('click', (event) => {
   const button = event.target.closest('[data-page]');
   if (!button) return;
-  $('#sidebar').classList.remove('open'); $('#mobile-scrim').classList.remove('active');
+  setMobileNavigation(false);
   renderPage(button.dataset.page);
 });
 $('#page-content').addEventListener('click', async (event) => {
@@ -951,8 +951,15 @@ document.addEventListener('click', (event) => {
     if (window.matchMedia('(max-width: 560px)').matches) $('.search-box').classList.remove('search-open');
   }
 });
-$('#mobile-menu').addEventListener('click', () => { $('#sidebar').classList.toggle('open'); $('#mobile-scrim').classList.toggle('active', $('#sidebar').classList.contains('open')); });
-$('#mobile-scrim').addEventListener('click', () => { $('#sidebar').classList.remove('open'); $('#mobile-scrim').classList.remove('active'); });
+function setMobileNavigation(open) {
+  $('#sidebar').classList.toggle('open', open);
+  $('#mobile-scrim').classList.toggle('active', open);
+  $('#mobile-menu').setAttribute('aria-expanded', String(open));
+  document.body.classList.toggle('mobile-nav-open', open);
+}
+$('#mobile-menu').setAttribute('aria-expanded', 'false');
+$('#mobile-menu').addEventListener('click', () => setMobileNavigation(!$('#sidebar').classList.contains('open')));
+$('#mobile-scrim').addEventListener('click', () => setMobileNavigation(false));
 
 installCommandBar();
 installRecorder();
@@ -983,6 +990,12 @@ async function boot() {
     try { state.health = await api.health(); renderHealth(); updateAuthUI(); }
     catch { /* A failed scheduled refresh is visible through the next explicit request. */ }
   }, 30000);
+}
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./service-worker.js', {scope: './'}).catch(() => {
+    // PWA installation is progressive; the application remains fully usable without it.
+  });
 }
 
 boot();
