@@ -209,6 +209,7 @@ export class VoiceEngine {
     this.speaking = false;
     this.muted = false;
     this.restartTimer = null;
+    this.voice = null;
   }
   supported() {
     return Boolean((window.SpeechRecognition || window.webkitSpeechRecognition) && navigator.mediaDevices?.getUserMedia && window.speechSynthesis);
@@ -241,6 +242,7 @@ export class VoiceEngine {
         if (this.running && !this.processing && !this.speaking) this.scheduleListen();
       };
       this.running = true;
+      this.refreshVoice();
       this.onState('ready');
       this.listen();
     } catch (error) {
@@ -248,6 +250,11 @@ export class VoiceEngine {
       if (error?.name === 'NotAllowedError' || error?.name === 'SecurityError') throw new Error('تم رفض صلاحية الميكروفون. اسمح بالوصول من إعدادات المتصفح ثم أعد المحاولة.');
       throw error;
     }
+  }
+  refreshVoice() {
+    const voices = window.speechSynthesis?.getVoices?.() || [];
+    this.voice = pickArabicVoice(voices);
+    return this.voice;
   }
   listen() {
     if (!this.running || this.processing || this.speaking || !this.recognition) return;
@@ -261,8 +268,10 @@ export class VoiceEngine {
     try { this.recognition?.abort(); } catch {}
     this.onState('speaking');
     window.speechSynthesis.cancel();
+    this.refreshVoice();
     const utterance = new SpeechSynthesisUtterance(String(text).slice(0, 6000));
-    utterance.lang = 'ar-SA'; utterance.rate = 1; utterance.pitch = 1;
+    utterance.lang = this.voice?.lang || 'ar-SA'; utterance.rate = 1; utterance.pitch = 1;
+    if (this.voice) utterance.voice = this.voice;
     utterance.onend = () => { this.speaking = false; this.completeProcessing(); };
     utterance.onerror = () => { this.speaking = false; this.onError('تعذر تشغيل الرد الصوتي؛ سيستمر وضع الاستماع.'); this.completeProcessing(); };
     window.speechSynthesis.speak(utterance);
@@ -274,6 +283,12 @@ export class VoiceEngine {
     this.onState(this.running ? 'listening' : 'ready');
   }
   unmute() { this.muted = false; }
+  toggleMute() {
+    if (this.muted) this.unmute();
+    else this.mute();
+    this.onState(this.running ? 'listening' : 'ready');
+    return this.muted;
+  }
   stop() {
     this.running = false; this.processing = false; this.speaking = false;
     clearTimeout(this.restartTimer);
