@@ -53,7 +53,7 @@ const runtimeModes = initRuntimeModes({onChange: async ({apiRoot}) => {
   } catch (error) {
     toast(`الوضع المحدد غير متاح: ${apiFailure(error)}`, 'error');
   }
-});
+}});
 setRuntimeApiRoot(runtimeModes.apiRootFor());
 
 async function refreshIntegrationAccountList() {
