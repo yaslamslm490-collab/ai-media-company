@@ -54,14 +54,27 @@ class GeminiAdapter:
     def from_env(cls, environ: dict[str, str] | None = None, *, opener: Callable[..., Any] | None = None) -> "GeminiAdapter":
         return cls(GeminiConfig.from_env(environ), opener=opener)
 
-    def chat(self, message: str, *, system_prompt: str = "") -> dict[str, str]:
-        text = str(message or "").strip()
-        if not text:
+    def chat(self, message: str | list[dict[str, str]], *, system_prompt: str = "") -> dict[str, str]:
+        if isinstance(message, str):
+            text = message.strip()
+            conversation = [{"role": "user", "content": text}] if text else []
+        elif isinstance(message, list):
+            conversation = []
+            for item in message[-20:]:
+                if not isinstance(item, dict):
+                    continue
+                role, content = item.get("role"), item.get("content")
+                if role not in {"user", "assistant"} or not isinstance(content, str) or not content.strip():
+                    continue
+                conversation.append({"role": role, "content": content.strip()[:4000]})
+        else:
+            conversation = []
+        if not conversation or conversation[-1]["role"] != "user":
             raise GeminiRequestFailed("لم يُرسل نص صالح إلى Gemini.")
         messages = []
         if system_prompt.strip():
             messages.append({"role": "system", "content": system_prompt.strip()})
-        messages.append({"role": "user", "content": text})
+        messages.extend(conversation)
         payload = {"model": self.config.model, "messages": messages}
         request = urllib.request.Request(
             f"{self.config.base_url}/chat/completions",

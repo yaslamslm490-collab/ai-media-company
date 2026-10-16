@@ -43,6 +43,18 @@ class GeminiAdapterTests(unittest.TestCase):
         self.assertEqual(payload["model"], "gemini-test-model")
         self.assertNotIn(key, json.dumps(result, ensure_ascii=False))
 
+    def test_chat_preserves_conversation_context(self):
+        opener = Mock(return_value=FakeResponse({"choices": [{"message": {"content": "رد سياقي"}}]}))
+        adapter = GeminiAdapter.from_env({"GEMINI_API_KEY": "mock-credential", "GEMINI_MODEL": "gemini-test-model"}, opener=opener)
+        history = [
+            {"role": "user", "content": "اسمي سلمى"},
+            {"role": "assistant", "content": "أهلًا سلمى"},
+            {"role": "user", "content": "ما اسمي؟"},
+        ]
+        adapter.chat(history, system_prompt="أجب بالعربية.")
+        payload = json.loads(opener.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(payload["messages"][1:], history)
+
     def test_http_failure_is_safe_and_does_not_expose_key(self):
         key = "mock" + "-credential-secret"
         opener = Mock(side_effect=urllib.error.URLError("offline"))

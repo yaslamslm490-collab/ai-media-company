@@ -1201,6 +1201,31 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
         def _post_api(self) -> dict[str, Any] | None:
             nonlocal token
             path = urllib.parse.urlsplit(self.path).path
+            if path == "/api/chat":
+                self._authenticate()
+                payload = self._body()
+                raw_messages = payload.get("messages")
+                if not isinstance(raw_messages, list) or not raw_messages or len(raw_messages) > 20:
+                    raise ApiProblem(400, "invalid_messages", "سجل المحادثة غير صالح أو أطول من الحد المسموح.")
+                conversation: list[dict[str, str]] = []
+                for item in raw_messages:
+                    if not isinstance(item, dict):
+                        raise ApiProblem(400, "invalid_messages", "رسالة المحادثة غير صالحة.")
+                    role, content = item.get("role"), item.get("content")
+                    if role not in {"user", "assistant"} or not isinstance(content, str) or not content.strip() or len(content) > 4000:
+                        raise ApiProblem(400, "invalid_messages", "رسالة المحادثة غير صالحة.")
+                    conversation.append({"role": role, "content": content.strip()})
+                if conversation[-1]["role"] != "user":
+                    raise ApiProblem(400, "invalid_messages", "يجب أن تنتهي المحادثة برسالة من المستخدم.")
+                try:
+                    return GeminiAdapter.from_env().chat(
+                        conversation,
+                        system_prompt="أنت ندى، مساعد NADA AI Media OS. أجب بالعربية بوضوح، واستفد من سجل المحادثة المرسل. لا تدّع تنفيذ إجراء خارجي.",
+                    )
+                except GeminiNotConfigured as error:
+                    raise ApiProblem(503, "gemini_not_configured", str(error)) from error
+                except GeminiError as error:
+                    raise ApiProblem(502, "gemini_request_failed", str(error)) from error
             if path == "/api/auth/login":
                 if not token:
                     raise ApiProblem(503, "auth_not_configured", "المصادقة غير مهيأة. اضبط رمز المالك في أسرار المضيف أولاً.")
