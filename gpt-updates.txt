@@ -1,0 +1,5 @@
+NADA AI Media OS — GitHub write-access test
+Branch: test/gpt-write-access
+Created: 2026-10-16
+Purpose: verify that the Manus GitHub account can create and push a non-main branch.
+No secrets or production data are included.
