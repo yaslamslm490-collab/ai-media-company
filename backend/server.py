@@ -870,11 +870,7 @@ def make_handler(*, root: Path = ROOT, db_path: str | Path | None = None, owner_
             path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
             relative = path.lstrip("/") or "index.html"
             target = (static_root / relative).resolve()
-            allowed = (
-                target == (static_root / "index.html").resolve()
-                or (target.parent == static_root and target.name in {"styles.css", "manus-routes.json", "app.js"})
-                or (target.parent == (static_root / "frontend").resolve() and target.suffix == ".js")
-            )
+            allowed = target == static_root or static_root in target.parents
             if not allowed or not target.is_file():
                 body = '{"error":{"code":"not_found","message":"المورد غير موجود."}}'.encode("utf-8")
                 self.send_response(404)

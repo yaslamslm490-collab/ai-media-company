@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a deployable static frontend directory without bundling secrets."""
+"""Build the unified React frontend while preserving the Python API server."""
 from __future__ import annotations
 
 import json
@@ -8,50 +8,27 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+REACT_ROOT = ROOT / "frontend-react"
 DIST = ROOT / "dist"
-ASSETS = (
-    "index.html",
-    "styles.css",
-    "manus-routes.json",
-    "app.js",
-    "frontend/app.js",
-    "frontend/runtime-modes.js",
-    "frontend/voice-engine.js",
-    "frontend/api.js",
-    "frontend/account-browser.js",
-    "frontend/status.js",
-    "frontend/company-builder.js",
-)
 
 
 def main() -> None:
-    for rel in ASSETS:
-        source = ROOT / rel
-        if not source.is_file() or source.stat().st_size == 0:
-            raise SystemExit(f"missing or empty build asset: {rel}")
-    index = (ROOT / "index.html").read_text(encoding="utf-8")
-    for expected in ("./styles.css", "./frontend/app.js"):
-        if expected not in index:
-            raise SystemExit(f"index.html does not reference required asset: {expected}")
-    routes = json.loads((ROOT / "manus-routes.json").read_text(encoding="utf-8"))
+    package_json = REACT_ROOT / "package.json"
+    if not package_json.is_file():
+        raise SystemExit("frontend-react/package.json is missing")
+    node_modules = REACT_ROOT / "node_modules"
+    if not (node_modules / ".bin" / "vite").exists():
+        subprocess.run(["npm", "install", "--no-audit", "--no-fund"], cwd=REACT_ROOT, check=True)
+    subprocess.run(["npm", "run", "build"], cwd=REACT_ROOT, check=True)
+    routes_source = ROOT / "manus-routes.json"
+    if routes_source.is_file():
+        shutil.copy2(routes_source, DIST / "manus-routes.json")
+    routes = json.loads(routes_source.read_text(encoding="utf-8"))
     if not isinstance(routes, (dict, list)):
         raise SystemExit("manus-routes.json must be a JSON object or array")
-
-    if DIST.exists():
-        shutil.rmtree(DIST)
-    for rel in ASSETS:
-        destination = DIST / rel
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / rel, destination)
-
-    built_app = (DIST / "frontend" / "app.js").read_text(encoding="utf-8")
-    for expected in ("./company-builder.js", "./account-browser.js", "./voice-engine.js"):
-        if expected not in built_app:
-            raise SystemExit(f"built entry point is missing the {expected} import")
-    for rel in ASSETS:
-        if not (DIST / rel).is_file():
-            raise SystemExit(f"build output missing asset: {rel}")
-    print(f"Built {len(ASSETS)} deployable assets in {DIST}")
+    if not (DIST / "index.html").is_file() or not any((DIST / "assets").glob("*.js")):
+        raise SystemExit("React build output is incomplete")
+    print(f"Built unified React frontend in {DIST}")
 
 
 if __name__ == "__main__":
