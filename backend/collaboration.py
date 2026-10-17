@@ -214,12 +214,25 @@ class Collaboration:
                 "background_jobs": background if isinstance(background, bool) else "UNKNOWN",
                 "task_status": local_status, "result_saved": bool(latest_result), "link": updated_link}
 
-    def _webhook_url(self) -> str:
-        base = (os.environ.get("PUBLIC_BASE_URL", "").strip() or os.environ.get("RENDER_EXTERNAL_URL", "").strip()).rstrip("/")
-        parsed = urllib.parse.urlsplit(base)
-        if parsed.scheme != "https" or not parsed.netloc or parsed.path or parsed.query or parsed.fragment:
+    def public_origin(self) -> str:
+        """Return the configured canonical HTTPS origin, shared by OAuth and webhooks."""
+        base = (os.environ.get("PUBLIC_BASE_URL", "").strip()
+                or os.environ.get("RENDER_EXTERNAL_URL", "").strip()).rstrip("/")
+        try:
+            parsed = urllib.parse.urlsplit(base)
+            if (parsed.scheme != "https" or not parsed.hostname or not parsed.netloc
+                    or parsed.username or parsed.password or parsed.path
+                    or parsed.query or parsed.fragment):
+                return ""
+            # Accessing port validates malformed port syntax before trusting the origin.
+            _ = parsed.port
+        except ValueError:
             return ""
-        return base + MANUS_WEBHOOK_PATH
+        return base
+
+    def _webhook_url(self) -> str:
+        base = self.public_origin()
+        return base + MANUS_WEBHOOK_PATH if base else ""
 
     def register_webhook(self) -> dict[str, Any]:
         url = self._webhook_url()

@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import secrets
 import tempfile
 import threading
 import time
@@ -108,12 +109,13 @@ class EmbeddedMCPHttpTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.token = "unit-test-mcp-token-" + "x" * 40
-        self.owner_token = "test-owner-token-32-characters-long"
+        self.owner_token = "test-owner-" + secrets.token_urlsafe(32)
         self.env_patch = patch.dict(os.environ, {
             "NADA_MCP_TOKEN": self.token,
             "MANUS_API_KEY": "",
             "MANUS_API_TOKEN": "",
             "PUBLIC_BASE_URL": "",
+            "RENDER_EXTERNAL_URL": "",
             "MANUS_WEBHOOK_PUBLIC_KEY": "",
         })
         self.env_patch.start()
@@ -175,6 +177,24 @@ class EmbeddedMCPHttpTests(unittest.TestCase):
         self.assertEqual(collaboration["manus_api"], "NOT_CONFIGURED")
         self.assertEqual(collaboration["mcp_endpoint"], "CONFIGURED")
         self.assertEqual(collaboration["public_https"], "NOT_CONFIGURED")
+
+    def test_render_external_url_is_accepted_for_registered_manus_webhook(self):
+        origin = "https://nada-ai.onrender.com"
+        payload = {"event_id": "render-probe-1", "event_type": "task_created",
+                   "task_detail": {"task_id": "unlinked-render-task"}}
+        raw = json.dumps(payload, separators=(",", ":")).encode()
+        request = Request(self.base + "/api/collaboration/manus/webhook", data=raw, method="POST",
+                          headers={"Content-Type": "application/json", "X-Webhook-Signature": "test",
+                                   "X-Webhook-Timestamp": str(int(time.time()))})
+        service = Collaboration(Store(Path(self.temp.name) / "server.sqlite3"))
+        with patch.dict(os.environ, {"PUBLIC_BASE_URL": "", "RENDER_EXTERNAL_URL": origin}):
+            self.assertEqual(service.public_origin(), origin)
+            self.assertEqual(service._webhook_url(), origin + "/api/collaboration/manus/webhook")
+            with patch.object(Collaboration, "verify_webhook", return_value=True) as verify:
+                with urlopen(request, timeout=4) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertTrue(json.loads(response.read())["accepted"])
+                self.assertEqual(verify.call_args.args[-1], origin + "/api/collaboration/manus/webhook")
 
 
 if __name__ == "__main__":
